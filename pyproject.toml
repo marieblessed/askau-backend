@@ -1,0 +1,94 @@
+[project]
+name = "api"
+version = "0.1.0"
+description = "AskAU — enterprise permission-aware RAG platform for the African Union Commission"
+requires-python = ">=3.12"
+
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "sqlalchemy[asyncio]>=2.0.36",
+  "asyncpg>=0.30",
+  "alembic>=1.14",
+  "pgvector>=0.3.6",
+  "redis>=5.2",
+  "httpx>=0.28",
+  "structlog>=24.4",
+  "python-json-logger>=2.0",
+  "joserfc>=1.0",
+  "orjson>=3.10",
+]
+
+[project.optional-dependencies]
+ingestion = [
+  "pymupdf>=1.24",
+  "python-docx>=1.1",
+  "openpyxl>=3.1",
+  "python-pptx>=1.0",
+  "beautifulsoup4>=4.12",
+  "lxml>=5.3",
+  "langdetect>=1.0.9",
+]
+embeddings = [
+  "sentence-transformers>=3.3",
+]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "pytest-cov>=6.0",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "import-linter>=2.1",
+  "asgi-lifespan>=2.1",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# ─────────────────────────── tooling ───────────────────────────
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ASYNC", "S", "TID"]
+ignore = ["S101"]  # assert is fine in tests and startup invariants
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"openai".msg = "Vendor SDKs are permitted only under */adapters/ — see docs/architecture/02-file-structure.md §4"
+"azure".msg = "Vendor SDKs are permitted only under */adapters/"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "pgvector.*", "langdetect.*", "sentence_transformers.*", "fitz.*",
+    "docx.*", "openpyxl.*", "pptx.*", "bs4.*", "pytesseract.*", "PIL.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "integration: requires a live PostgreSQL with pgvector",
+  "security: authorization isolation suite (TC-SEC-*)",
+]
+
+[tool.coverage.report]
+fail_under = 80

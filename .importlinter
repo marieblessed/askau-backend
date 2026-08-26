@@ -1,0 +1,53 @@
+# Architectural boundaries from docs/architecture/02-file-structure.md §4.
+# These are the rules that keep FR-042 (replaceable providers) and the
+# authorization boundary from eroding under delivery pressure.
+
+[importlinter]
+root_package = askau
+
+[importlinter:contract:1]
+name = domain-is-pure
+type = forbidden
+source_modules = askau.domain
+forbidden_modules =
+    askau.api
+    askau.core
+    askau.db
+    askau.rag
+    askau.retrieval
+    askau.llm
+    askau.ingestion
+    askau.audit
+
+# The contract that actually protects FR-042: orchestration and ingestion may
+# depend on a *port*, never on an adapter. Ingestion legitimately needs an
+# Embedder to vectorise chunks — that is the port doing its job. Reaching for
+# `llm.adapters.azure_openai` would not be, and this is what stops it.
+[importlinter:contract:2]
+name = layers-use-ports-not-adapters
+type = forbidden
+source_modules =
+    askau.rag
+    askau.ingestion
+    askau.retrieval
+forbidden_modules =
+    askau.retrieval.adapters
+    askau.llm.adapters
+    askau.ingestion.extractors.ocr
+
+[importlinter:contract:3]
+name = layered-architecture
+type = layers
+# `:` rather than `|`: these are peers that may collaborate, not peers that
+# must stay strangers.
+# They are one tier — ingestion embeds, retrieval embeds, both sit above the
+# database and below orchestration. Forbidding sibling imports would push the
+# Embedder port into `domain`, where an infrastructure contract does not belong.
+# The adapter boundary above is what carries the real guarantee.
+layers =
+    askau.api
+    askau.rag
+    askau.retrieval : askau.llm : askau.ingestion
+    askau.db
+    askau.core
+    askau.domain
