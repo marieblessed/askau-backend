@@ -27,7 +27,8 @@ from askau.core.errors import UpstreamUnavailableError
 from askau.domain.answer import EvidenceAssessment, GroundedAnswer
 from askau.domain.authz import AuthorizationContext
 from askau.domain.enums import AnswerState, RetrievalStrategy, ts_config_for
-from askau.domain.retrieval import RetrievalQuery, RetrievalResult
+from askau.domain.profiles import RetrievalProfile, RetrievalTier, profile_for
+from askau.domain.retrieval import RetrievalQuery, RetrievalResult, RetrievedChunk
 from askau.llm.ports import LLM, Embedder
 from askau.llm.usage import UsageLedger
 from askau.rag import citations as citation_mod
@@ -66,6 +67,10 @@ class AnswerTrace:
     rewritten_query: str | None = None
     retrieval_ms: int = 0
     rerank_ms: int = 0
+    #: Set when the evidence gate was unconvinced and a wider second pass ran.
+    escalated: bool = False
+    #: Candidates the database considered, summed across passes.
+    candidates_considered: int = 0
     ttft_ms: int = 0
     total_ms: int = 0
     retrieved: int = 0
@@ -113,7 +118,16 @@ class RagOrchestrator:
         language: str = "en",
         include_historical: bool = False,
         history: list[tuple[str, str]] | None = None,
+        allow_escalation: bool = False,
     ) -> tuple[GroundedAnswer, AnswerTrace]:
+        """`allow_escalation` is the caller's consent, not its instruction.
+
+        It comes from `users.higher_intelligence` and is read at the route,
+        because `rag/` may not import `db/`. Passing the *permission* rather
+        than the tier keeps the decision here, where the evidence signal that
+        justifies it is: a caller cannot demand a thorough pass on a question
+        that did not need one.
+        """
         started = time.perf_counter()
         trace = AnswerTrace()
 
@@ -129,9 +143,16 @@ class RagOrchestrator:
         # actually asked.
         resolution = followup_mod.resolve(question, history)
         trace.rewritten_query = resolution.query if resolution.rewritten else None
-        retrieval = await self._retrieve(resolution.query, authz, language, include_historical)
+        # Embedded once, here, and reused if a second pass runs. The resolved
+        # query does not change when the tier does, so re-embedding it would be
+        # a network call for a value already in hand.
+        vector = await self._embed(resolution.query, authz)
+        retrieval = await self._retrieve(
+            resolution.query, authz, language, include_historical, embedding=vector
+        )
         trace.retrieval_ms = retrieval.took_ms
         trace.retrieved = len(retrieval)
+        trace.candidates_considered = retrieval.candidates_considered
 
         chunks = await self._rerank(question, retrieval, trace)
 
@@ -157,19 +178,17 @@ class RagOrchestrator:
             )
 
         # ── the gate. Nothing below this line runs on insufficient evidence. ──
-        assessment = evidence_mod.assess(
-            RetrievalResult(
-                chunks=chunks,
-                strategy=retrieval.strategy,
-                candidates_considered=retrieval.candidates_considered,
-                took_ms=retrieval.took_ms,
-            ),
-            self._thresholds,
-            # The resolved query, not the surface form. "Does this apply to
-            # staff on probation?" shares almost no vocabulary with the leave
-            # policy on its own, so judging evidence against the elliptical
-            # question refuses a follow-up whose answer was sitting right there.
-            resolution.query,
+        retrieval, chunks, assessment = await self._assess(
+            question=question,
+            resolved=resolution.query,
+            authz=authz,
+            language=language,
+            include_historical=include_historical,
+            retrieval=retrieval,
+            chunks=chunks,
+            trace=trace,
+            allow_escalation=allow_escalation,
+            embedding=vector,
         )
         if not assessment.sufficient:
             trace.total_ms = int((time.perf_counter() - started) * 1000)
@@ -179,6 +198,7 @@ class RagOrchestrator:
                     content=evidence_mod.INSUFFICIENT_EVIDENCE_MESSAGE,
                     retrieval=retrieval,
                     evidence=assessment,
+                    diagnostics={"escalated": trace.escalated},
                 ),
                 trace,
             )
@@ -218,6 +238,7 @@ class RagOrchestrator:
         language: str = "en",
         include_historical: bool = False,
         history: list[tuple[str, str]] | None = None,
+        allow_escalation: bool = False,
     ) -> AsyncIterator[Stage | str | GroundedAnswer]:
         """Yield progress stages, then tokens, then the finished answer.
 
@@ -241,9 +262,16 @@ class RagOrchestrator:
 
         resolution = followup_mod.resolve(question, history)
         trace.rewritten_query = resolution.query if resolution.rewritten else None
-        retrieval = await self._retrieve(resolution.query, authz, language, include_historical)
+        # Embedded once, here, and reused if a second pass runs. The resolved
+        # query does not change when the tier does, so re-embedding it would be
+        # a network call for a value already in hand.
+        vector = await self._embed(resolution.query, authz)
+        retrieval = await self._retrieve(
+            resolution.query, authz, language, include_historical, embedding=vector
+        )
         trace.retrieval_ms = retrieval.took_ms
         trace.retrieved = len(retrieval)
+        trace.candidates_considered = retrieval.candidates_considered
         chunks = await self._rerank(question, retrieval, trace)
 
         # Same order as the buffered path: clarification first, because vagueness
@@ -259,15 +287,17 @@ class RagOrchestrator:
             )
             return
 
-        assessment = evidence_mod.assess(
-            RetrievalResult(
-                chunks=chunks,
-                strategy=retrieval.strategy,
-                candidates_considered=retrieval.candidates_considered,
-                took_ms=retrieval.took_ms,
-            ),
-            self._thresholds,
-            resolution.query,
+        retrieval, chunks, assessment = await self._assess(
+            question=question,
+            resolved=resolution.query,
+            authz=authz,
+            language=language,
+            include_historical=include_historical,
+            retrieval=retrieval,
+            chunks=chunks,
+            trace=trace,
+            allow_escalation=allow_escalation,
+            embedding=vector,
         )
         if not assessment.sufficient:
             trace.total_ms = elapsed()
@@ -323,21 +353,116 @@ class RagOrchestrator:
 
     # ── stages ──────────────────────────────────────────────────────────────
 
+    async def _assess(
+        self,
+        *,
+        question: str,
+        resolved: str,
+        authz: AuthorizationContext,
+        language: str,
+        include_historical: bool,
+        retrieval: RetrievalResult,
+        chunks: tuple[RetrievedChunk, ...],
+        trace: AnswerTrace,
+        allow_escalation: bool,
+        embedding: list[float] | None = None,
+    ) -> tuple[RetrievalResult, tuple[RetrievedChunk, ...], EvidenceAssessment]:
+        """Run the evidence gate, widening once if it is unconvinced (FR-016).
+
+        Shared by the buffered and streaming paths deliberately. The two have
+        drifted apart before — there were once two `_sse` helpers that
+        serialized differently — and a gate that escalates on one path but not
+        the other would be the worst version of that: the same question
+        answered or refused depending on which endpoint the client used.
+
+        The second pass is only reached when the gate was unconvinced *and*
+        this person consented. Widening after a weak result costs nothing on
+        the answers that were already grounded, and the signal it uses — this
+        question's own evidence — is a better judge of "complex" than anything
+        guessable before retrieving.
+
+        Re-assessed afterwards on its own merits: a wider net that still finds
+        nothing is still a refusal. Escalation buys another look, never a
+        lower bar.
+        """
+
+        def gate(r: RetrievalResult, c: tuple[RetrievedChunk, ...]) -> EvidenceAssessment:
+            return evidence_mod.assess(
+                RetrievalResult(
+                    chunks=c,
+                    strategy=r.strategy,
+                    candidates_considered=r.candidates_considered,
+                    took_ms=r.took_ms,
+                ),
+                self._thresholds,
+                # The resolved query, not the surface form. "Does this apply to
+                # staff on probation?" shares almost no vocabulary with the
+                # leave policy on its own, so judging evidence against the
+                # elliptical question refuses a follow-up whose answer was
+                # sitting right there.
+                resolved,
+            )
+
+        assessment = gate(retrieval, chunks)
+        if assessment.sufficient or not allow_escalation:
+            return retrieval, chunks, assessment
+
+        wider = await self._retrieve(
+            resolved,
+            authz,
+            language,
+            include_historical,
+            self._profile(RetrievalTier.THOROUGH),
+            embedding=embedding,
+        )
+        trace.escalated = True
+        trace.retrieval_ms += wider.took_ms
+        trace.candidates_considered += wider.candidates_considered
+        # Only adopt the wider result if it actually found more. A second pass
+        # that returns the same chunks has nothing to re-assess, and swapping in
+        # an equal-or-worse result would let escalation make an answer worse.
+        if len(wider) <= len(retrieval):
+            return retrieval, chunks, assessment
+
+        chunks = await self._rerank(question, wider, trace)
+        trace.retrieved = len(wider)
+        return wider, chunks, gate(wider, chunks)
+
+    def _profile(self, tier: RetrievalTier) -> RetrievalProfile:
+        """The tier resolved against configuration. See `domain/profiles.py`."""
+        return profile_for(
+            tier,
+            candidate_k=self._settings.retrieval_candidate_k,
+            top_k=self._settings.retrieval_top_k,
+            rerank_input_k=self._settings.rerank_input_k,
+        )
+
     async def _retrieve(
         self,
         question: str,
         authz: AuthorizationContext,
         language: str,
         include_historical: bool,
+        profile: RetrievalProfile | None = None,
+        embedding: list[float] | None = None,
     ) -> RetrievalResult:
-        embedding = await self._embed(question, authz)
+        """`embedding` is reusable across passes because it is a pure function
+        of the query text, which does not change when the tier does.
+
+        Worth passing explicitly rather than caching inside `_embed`: the second
+        pass would otherwise make a network call to the embedding model for a
+        result it already holds, and bill it to `model_invocations` as though it
+        were work.
+        """
+        p = profile or self._profile(RetrievalTier.STANDARD)
+        vector = embedding if embedding is not None else await self._embed(question, authz)
         return await self._retriever.search(
             RetrievalQuery(
                 text=question,
-                embedding=embedding,
+                embedding=vector,
                 authz=authz,
-                candidate_k=self._settings.retrieval_candidate_k,
-                top_k=self._settings.retrieval_top_k,
+                candidate_k=p.candidate_k,
+                top_k=p.top_k,
                 strategy=RetrievalStrategy.HYBRID,
                 include_historical=include_historical,
                 # The *asker's* configuration. Documents are stemmed with their
@@ -421,17 +546,22 @@ class RagOrchestrator:
 
         grounding = grounding_mod.score(resolved.text, assembled.text)
 
-        # Conflicts are detected among the chunks the answer actually cited, not
-        # everything retrieved. A disagreement between two documents the answer
-        # never drew on is not a conflict in the answer — surfacing it would
-        # attach a per-diem warning to a question about annual leave, and a
-        # notice that fires on unrelated questions is a notice users learn to
-        # ignore.
+        # A topic only counts as in play when the answer cited something in it —
+        # otherwise a per-diem disagreement would attach itself to a question
+        # about annual leave, and a notice that fires on unrelated questions is
+        # one users learn to ignore.
+        #
+        # But once a topic *is* in play, every retrieved chunk on it is compared,
+        # not just the cited ones. Comparing only citations let the model decide
+        # whether a disagreement was disclosed: quoting both figures warned the
+        # reader, quoting one and ignoring the other did not, and which happened
+        # varied run to run on identical input.
         cited_markers = {c.marker for c in resolved.citations}
         cited_chunks = tuple(
             chunk for marker, chunk in assembled.chunks_by_marker.items() if marker in cited_markers
         )
-        conflicts = conflict_mod.detect(cited_chunks or tuple(assembled.chunks_by_marker.values()))
+        retrieved_chunks = tuple(assembled.chunks_by_marker.values())
+        conflicts = conflict_mod.detect(cited_chunks or retrieved_chunks, retrieved_chunks)
 
         if conflicts:
             state = AnswerState.CONFLICT
@@ -468,6 +598,12 @@ class RagOrchestrator:
                 "unused_sources": resolved.unused_sources,
                 "authority_scrubbed": scan_result.scrubbed,
                 "injection_detections": assembled.injection_detections,
+                # The sentences the lexical measure could not match. Carried
+                # because the score alone is not interpretable: an answer that
+                # drifted from its sources and an answer that explained which
+                # source it preferred both land below 1.0, and only these
+                # sentences tell you which happened.
+                "unsupported_sentences": grounding.unsupported,
             },
         )
 

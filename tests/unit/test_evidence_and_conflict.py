@@ -149,3 +149,78 @@ class TestConflictDetection:
             )
         )
         assert conflicts == ()
+
+
+class TestAModelCannotSuppressAConflict:
+    """The disagreement is disclosed whether or not the answer quoted both sides.
+
+    Conflicts were once detected only among the chunks the answer *cited*, and
+    that let the language model decide whether a contradiction reached the
+    reader: quote both figures and the warning appeared, quote one and ignore
+    the other and the answer was reported as grounded. Same question, same
+    corpus, same retrieval — measured at three times in five against a real
+    model.
+
+    A model that can suppress a safety notice by declining to cite it is a model
+    deciding a safety question. Detection now spans everything retrieved on a
+    topic the answer touched.
+    """
+
+    def _chunk(self, doc: str, heading: str, content: str, chunk_id: int):
+        from askau.domain.enums import Classification
+        from askau.domain.retrieval import RetrievedChunk
+
+        return RetrievedChunk(
+            chunk_id=chunk_id,
+            document_id=doc,
+            document_title=doc,
+            source_uri=f"https://example/{doc}",
+            source_name="test",
+            content=content,
+            heading_path=(heading,),
+            classification=Classification.INTERNAL,
+            score=1.0,
+        )
+
+    def test_a_conflict_the_answer_ignored_is_still_reported(self) -> None:
+        from askau.rag import conflict as conflict_mod
+
+        cited = self._chunk("Circular", "Continental Rate", "The rate is USD 180 per night.", 1)
+        ignored = self._chunk("Handbook", "Continental Rate", "The rate is USD 150 per night.", 2)
+
+        # What the old behaviour did — only the cited chunk — finds nothing.
+        assert conflict_mod.detect((cited,)) == ()
+
+        # Considering everything retrieved on that topic finds the disagreement.
+        conflicts = conflict_mod.detect((cited,), (cited, ignored))
+        assert len(conflicts) == 1
+        assert "180" in conflicts[0].summary and "150" in conflicts[0].summary
+
+    def test_an_unrelated_disagreement_is_not_dragged_in(self) -> None:
+        """The rule the original design was right about, and which must survive.
+
+        A per-diem contradiction has no business attaching itself to a question
+        about annual leave. A notice that fires on unrelated questions is one
+        people learn to ignore, which costs more than the notice is worth.
+        """
+        from askau.rag import conflict as conflict_mod
+
+        cited = self._chunk("Leave", "Annual Leave", "Staff accrue 30 days per year.", 1)
+        unrelated_a = self._chunk("Circular", "Continental Rate", "USD 180 per night.", 2)
+        unrelated_b = self._chunk("Handbook", "Continental Rate", "USD 150 per night.", 3)
+
+        assert conflict_mod.detect((cited,), (cited, unrelated_a, unrelated_b)) == ()
+
+    def test_it_is_deterministic_for_a_fixed_retrieval(self) -> None:
+        """Whichever side the model happened to quote, the verdict is the same."""
+        from askau.rag import conflict as conflict_mod
+
+        a = self._chunk("Circular", "Continental Rate", "The rate is USD 180 per night.", 1)
+        b = self._chunk("Handbook", "Continental Rate", "The rate is USD 150 per night.", 2)
+        retrieved = (a, b)
+
+        cited_a_only = conflict_mod.detect((a,), retrieved)
+        cited_b_only = conflict_mod.detect((b,), retrieved)
+        cited_both = conflict_mod.detect((a, b), retrieved)
+
+        assert len(cited_a_only) == len(cited_b_only) == len(cited_both) == 1

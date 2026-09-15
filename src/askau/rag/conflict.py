@@ -70,7 +70,10 @@ def _leaf(chunk: RetrievedChunk) -> str:
     return chunk.heading_path[-1].lower().strip() if chunk.heading_path else ""
 
 
-def detect(chunks: tuple[RetrievedChunk, ...]) -> tuple[SourceConflict, ...]:
+def detect(
+    chunks: tuple[RetrievedChunk, ...],
+    also_consider: tuple[RetrievedChunk, ...] = (),
+) -> tuple[SourceConflict, ...]:
     """Find numeric disagreements between different documents on one topic.
 
     Two chunks are the same topic when their section headings match exactly, or
@@ -82,10 +85,27 @@ def detect(chunks: tuple[RetrievedChunk, ...]) -> tuple[SourceConflict, ...]:
     False positives are prevented downstream instead, by requiring the two
     documents to assert *disjoint* value sets — which is a much more reliable
     discriminator than topic similarity.
+
+    ``chunks`` is what the answer cited; ``also_consider`` is everything else
+    that was retrieved. A topic is only examined when a *cited* chunk belongs to
+    it — so a disagreement about per diem never attaches itself to a question
+    about annual leave — but once a topic is in play, values are compared across
+    everything retrieved on it, cited or not.
+
+    That asymmetry is the whole point of the parameter. Comparing only cited
+    chunks let the language model decide whether a disagreement was disclosed:
+    when it happened to quote both figures the reader was warned, and when it
+    quoted one and ignored the other the reader was told the answer was
+    grounded. Same question, same corpus, same retrieval — a coin flip,
+    measured at three times in five. A model that can suppress a conflict by
+    declining to cite it is a model deciding a safety question, which is the one
+    thing this system is built not to allow.
     """
     conflicts: list[SourceConflict] = []
     by_topic: dict[frozenset[str], list[RetrievedChunk]] = defaultdict(list)
     leaves: dict[frozenset[str], str] = {}
+    #: Topics reached by a cited chunk. Only these are reported on.
+    in_play: set[frozenset[str]] = set()
 
     for chunk in chunks:
         topic = _topic(chunk)
@@ -99,7 +119,25 @@ def detect(chunks: tuple[RetrievedChunk, ...]) -> tuple[SourceConflict, ...]:
             by_topic[topic].append(chunk)
             leaves[topic] = leaf
 
-    for group in by_topic.values():
+    in_play = set(by_topic)
+
+    # Now fold in the rest of what was retrieved, but only where it joins a
+    # topic a citation already reached. Anything that would open a *new* topic
+    # is dropped — that is the case the cited-only rule was right about.
+    for chunk in also_consider:
+        if chunk in chunks:
+            continue
+        topic = _topic(chunk)
+        leaf = _leaf(chunk)
+        for existing in by_topic:
+            same_heading = bool(leaf) and leaves.get(existing) == leaf
+            if same_heading or len(topic & existing) >= 2:
+                by_topic[existing].append(chunk)
+                break
+
+    for key, group in by_topic.items():
+        if key not in in_play:
+            continue
         documents = {c.document_id for c in group}
         if len(documents) < 2:
             continue

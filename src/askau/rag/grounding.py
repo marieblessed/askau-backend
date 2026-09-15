@@ -2,12 +2,20 @@
 
 Measures how much of an answer is actually supported by the retrieved chunks.
 Deliberately lexical rather than model-based: this runs inline on every answer,
-so it must be fast and deterministic. The model-based judge in the evaluation
-harness is the more sensitive instrument, and it runs offline on a sample.
+so it must be fast and deterministic.
 
 The lexical score is a floor, not a verdict — it reliably catches an answer that
 has drifted away from its sources, and does not claim to catch subtle
 misstatement.
+
+**There is no more sensitive instrument yet.** An earlier version of this
+docstring referred to "the model-based judge in the evaluation harness" as
+though it existed; it does not, and `evaluation/runner.py` scopes it to Phase 2
+for a stated reason — a semantic judge needs a second model and a human
+calibration set, and an uncalibrated one would report confident nonsense about
+answer quality. Until it is built, this floor is the whole of what AskAU
+measures about groundedness, and the gate in `evaluation/datasets.py` is set
+with that in mind.
 """
 
 from __future__ import annotations

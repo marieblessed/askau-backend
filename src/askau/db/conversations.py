@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from askau.domain.answer import GroundedAnswer
 from askau.domain.conversation import Citation
-from askau.domain.enums import MessageRole
+from askau.domain.enums import Classification, MessageRole
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +45,32 @@ class StoredConversation:
     message_count: int
     last_message_at: datetime | None
     created_at: datetime
+    #: First line of the most recent message. The client's sidebar and its
+    #: `/conversations` page both render it, and fetching every message to
+    #: derive it would make listing a conversation as expensive as opening one.
+    last_message_preview: str | None = None
+    #: `active | archived | deleted`. Their `types/conversation.ts` models three
+    #: states where this table had a boolean; carried as text so the wire matches
+    #: without the caller having to reconstruct it from `is_archived`.
+    status: str = "active"
+
+
+@dataclass(frozen=True, slots=True)
+class UserPreferences:
+    """The three settings that are real, defaulting to the safe posture.
+
+    A named object rather than a tuple because it is unpacked at five call
+    sites: a fourth preference appended to a positional tuple would silently
+    hand `share_analytics` to whoever was reading the third element.
+
+    `higher_intelligence` defaults False while the other two default True —
+    the privacy toggles are opt-outs of useful behaviour, this one is an opt-in
+    to additional work against a shared database.
+    """
+
+    save_history: bool = True
+    share_analytics: bool = True
+    higher_intelligence: bool = False
 
 
 class ConversationRepository:
@@ -52,6 +78,89 @@ class ConversationRepository:
         self._engine = engine
 
     # ── conversations ───────────────────────────────────────────────────────
+
+    async def preferences(self, user_id: str) -> UserPreferences:
+        """One person's settings.
+
+        Read per request rather than cached on the session: a privacy setting
+        must take effect when it is changed, not when the token next rotates.
+
+        Returns defaults for an unknown id rather than raising. The caller is
+        always an authenticated identity, so a missing row means the user
+        record has not been provisioned yet — and the safe reading of that is
+        the default posture, not a 500 on a question that would have answered.
+        """
+        async with self._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text("""
+                    SELECT save_history, share_analytics, higher_intelligence FROM users
+                    WHERE id = CAST(:uid AS uuid)
+                    """),
+                    {"uid": user_id},
+                )
+            ).first()
+        if row is None:
+            return UserPreferences()
+        return UserPreferences(
+            save_history=bool(row[0]),
+            share_analytics=bool(row[1]),
+            higher_intelligence=bool(row[2]),
+        )
+
+    async def set_preferences(
+        self,
+        user_id: str,
+        *,
+        save_history: bool | None = None,
+        share_analytics: bool | None = None,
+        higher_intelligence: bool | None = None,
+    ) -> None:
+        """`coalesce` so an omitted field keeps its value.
+
+        The alternative — writing every column from a full object — turns
+        changing one toggle into silently rewriting the others from whatever
+        the client last read, which is how a privacy setting switches itself
+        back on.
+        """
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("""
+                UPDATE users
+                SET save_history        = coalesce(:save, save_history),
+                    share_analytics     = coalesce(:share, share_analytics),
+                    higher_intelligence = coalesce(:higher, higher_intelligence)
+                WHERE id = CAST(:uid AS uuid)
+                """),
+                {
+                    "uid": user_id,
+                    "save": save_history,
+                    "share": share_analytics,
+                    "higher": higher_intelligence,
+                },
+            )
+
+    async def delete_all_for(self, user_id: str) -> int:
+        """Remove every conversation this person owns. Returns how many.
+
+        Scoped by `user_id` like every other write here — "delete all" means all
+        of *mine*. Messages, citations and feedback go with the conversation by
+        cascade; the audit record of the deletion is written by the route,
+        because a deletion is itself an event worth keeping.
+        """
+        async with self._engine.begin() as conn:
+            return int(
+                (
+                    await conn.execute(
+                        text("""
+                        DELETE FROM conversations
+                        WHERE user_id = CAST(:uid AS uuid)
+                        """),
+                        {"uid": user_id},
+                    )
+                ).rowcount
+                or 0
+            )
 
     async def create(self, user_id: str, title: str | None = None) -> str:
         async with self._engine.begin() as conn:
@@ -68,25 +177,78 @@ class ConversationRepository:
                 ).scalar_one()
             )
 
-    async def list_for(self, user_id: str, limit: int = 50) -> list[StoredConversation]:
+    async def list_for(
+        self, user_id: str, limit: int = 50, offset: int = 0
+    ) -> list[StoredConversation]:
         async with self._engine.connect() as conn:
             rows = (
                 (
                     await conn.execute(
                         text("""
-                    SELECT id::text, title, message_count, last_message_at, created_at
-                    FROM conversations
-                    WHERE user_id = CAST(:user_id AS uuid) AND NOT is_archived
-                    ORDER BY coalesce(last_message_at, created_at) DESC
-                    LIMIT :limit
+                    SELECT c.id::text, c.title, c.message_count,
+                           c.last_message_at, c.created_at,
+                           CASE WHEN c.is_archived THEN 'archived' ELSE 'active' END AS status,
+                           -- The newest message, truncated. LATERAL so the
+                           -- subquery runs once per conversation rather than
+                           -- once per candidate row.
+                           left(p.content, 140) AS last_message_preview
+                    FROM conversations c
+                    LEFT JOIN LATERAL (
+                        SELECT m.content
+                        FROM messages m
+                        WHERE m.conversation_id = c.id
+                        ORDER BY m.seq DESC
+                        LIMIT 1
+                    ) p ON TRUE
+                    WHERE c.user_id = CAST(:user_id AS uuid) AND NOT c.is_archived
+                    ORDER BY coalesce(c.last_message_at, c.created_at) DESC
+                    LIMIT :limit OFFSET :offset
                     """),
-                        {"user_id": user_id, "limit": limit},
+                        {"user_id": user_id, "limit": limit, "offset": offset},
                     )
                 )
                 .mappings()
                 .all()
             )
         return [StoredConversation(**dict(r)) for r in rows]
+
+    async def count_for(self, user_id: str) -> int:
+        """Total conversations this person owns, for the pagination envelope.
+
+        A separate count rather than one derived from the page: the client's
+        `hasMore` and `total` describe the whole collection, and a page of 20 out
+        of 200 cannot tell you which it is.
+        """
+        async with self._engine.connect() as conn:
+            return int(
+                (
+                    await conn.execute(
+                        text("""
+                        SELECT count(*) FROM conversations
+                        WHERE user_id = CAST(:user_id AS uuid) AND NOT is_archived
+                        """),
+                        {"user_id": user_id},
+                    )
+                ).scalar_one()
+            )
+
+    async def title_of(self, conversation_id: str, user_id: str) -> str | None:
+        """The conversation's own title, scoped to its owner (FR-006).
+
+        Carries the same `user_id` predicate as every other read here. A title
+        is a summary of what someone asked, which §6.5 treats as their business
+        and nobody else's — so this cannot be the one query that omits it.
+        """
+        async with self._engine.connect() as conn:
+            return (
+                await conn.execute(
+                    text("""
+                    SELECT title FROM conversations
+                    WHERE id = CAST(:cid AS uuid) AND user_id = CAST(:uid AS uuid)
+                    """),
+                    {"cid": conversation_id, "uid": user_id},
+                )
+            ).scalar_one_or_none()
 
     async def owned_by(self, conversation_id: str, user_id: str) -> bool:
         """Ownership check for routes that mutate rather than read.
@@ -104,6 +266,23 @@ class ConversationRepository:
                     )
                     """),
                     {"cid": conversation_id, "uid": user_id},
+                )
+            ).scalar_one() is True
+
+    async def exists(self, conversation_id: str) -> bool:
+        """Whether any row holds this id, regardless of owner.
+
+        Distinct from `owned_by`, which answers false for both "someone else's"
+        and "no such thing". Telling those two apart is what lets an ephemeral
+        conversation be accepted without accepting anybody else's.
+        """
+        async with self._engine.connect() as conn:
+            return (
+                await conn.execute(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM conversations WHERE id = CAST(:cid AS uuid))"
+                    ),
+                    {"cid": conversation_id},
                 )
             ).scalar_one() is True
 
@@ -203,6 +382,14 @@ class ConversationRepository:
                            c.document_id::text AS document_id, c.rank, c.quote,
                            c.page_from, c.page_to, c.section_ref, c.verified,
                            d.title AS document_title, d.source_uri, d.version_label,
+                           -- Joined at read time, not stored on the citation.
+                           -- A policy that has since been superseded should say
+                           -- so when the conversation is reopened; a snapshot
+                           -- taken at answer time would keep insisting it was
+                           -- current. This is what makes the `outdated` state
+                           -- reachable for a stored answer.
+                           d.department, d.doc_type, d.lifecycle::text AS lifecycle,
+                           d.effective_from, d.classification::text AS classification,
                            ks.name AS source_name
                     FROM citations c
                     JOIN documents d ON d.id = c.document_id
@@ -233,6 +420,11 @@ class ConversationRepository:
                     page_from=c["page_from"],
                     page_to=c["page_to"],
                     version_label=c["version_label"],
+                    department=c["department"],
+                    doc_type=c["doc_type"],
+                    lifecycle=c["lifecycle"],
+                    effective_from=c["effective_from"],
+                    classification=Classification(c["classification"]),
                     verified=c["verified"],
                 )
             )

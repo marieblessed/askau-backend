@@ -74,6 +74,11 @@ class RetrievedChunk:
     # provenance and currency
     classification: Classification = Classification.INTERNAL
     lifecycle: Lifecycle = Lifecycle.ACTIVE
+    #: Owning directorate, and what kind of document this is. Not used by
+    #: retrieval — they are carried for the citation, so a reader can see who
+    #: owns a policy and whether it is a circular or a manual without opening it.
+    department: str | None = None
+    doc_type: str | None = None
     version_label: str | None = None
     version_seq: int = 1
     effective_from: date | None = None
