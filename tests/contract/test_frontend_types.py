@@ -26,10 +26,21 @@ import pytest
 from askau.api.schemas import wire
 
 #: Sibling checkout by default; overridable so CI can point at a clone.
+#:
+#: `parents[3]` is the directory *containing* this repository — `tests/contract`
+#: → `tests` → repository root → its parent. It was `[4]`, correct when this
+#: file lived at `api/tests/contract/` inside the monorepo, and one level too
+#: high once the backend became its own repository.
+#:
+#: The consequence was invisible, which is the point worth recording: the path
+#: simply did not exist, every test in this module skipped, and the suite
+#: reported success. A cross-repo type check that silently stops running is
+#: worse than no check, because the drift it exists to catch now goes unnoticed
+#: *and* unmentioned.
 _FRONTEND = Path(
     os.environ.get(
         "ASKAU_FRONTEND_PATH",
-        Path(__file__).resolve().parents[4] / "askau-frontend",
+        Path(__file__).resolve().parents[3] / "askau-frontend",
     )
 )
 
