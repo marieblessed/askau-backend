@@ -51,6 +51,14 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The system prompt is loaded from disk at orchestrator construction, so it has
+# to travel with the package. Without this it is simply absent from a built
+# wheel and the application fails at startup with a FileNotFoundError pointing
+# into site-packages — which is what happened the first time this package was
+# installed non-editable, and would have happened on the first real deployment.
+[tool.setuptools.package-data]
+askau = ["rag/prompts/*.md"]
+
 # ─────────────────────────── tooling ───────────────────────────
 
 [tool.ruff]
@@ -79,6 +87,7 @@ plugins = ["pydantic.mypy"]
 module = [
     "pgvector.*", "langdetect.*", "sentence_transformers.*", "fitz.*",
     "docx.*", "openpyxl.*", "pptx.*", "bs4.*", "pytesseract.*", "PIL.*",
+    "lxml.*",
 ]
 ignore_missing_imports = true
 

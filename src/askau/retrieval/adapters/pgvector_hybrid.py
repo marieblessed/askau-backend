@@ -80,6 +80,7 @@ SELECT f.rrf_score, f.semantic_rank, f.keyword_rank,
        c.classification, c.lifecycle, c.language,
        d.id AS document_id, d.title, d.source_uri,
        d.version_label, d.effective_from, d.effective_to,
+       d.department, d.doc_type,
        ks.name AS source_name
 FROM fused f
 JOIN chunks c            ON c.id = f.id AND c.classification = f.classification
@@ -212,6 +213,8 @@ def _to_chunk(r: RowMapping) -> RetrievedChunk:
         version_seq=r["version_seq"],
         effective_from=r["effective_from"],
         effective_to=r["effective_to"],
+        department=r["department"],
+        doc_type=r["doc_type"],
         language=r["language"],
         token_count=r["token_count"],
         semantic_rank=r["semantic_rank"],

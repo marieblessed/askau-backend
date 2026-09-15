@@ -20,7 +20,6 @@ than signal.
 from __future__ import annotations
 
 import pytest
-from fastapi.routing import APIRoute
 
 from askau.main import create_app
 from tests.conftest import requires_db
@@ -34,23 +33,43 @@ PUBLIC: dict[str, str] = {
     "/health/live": "liveness probe; kubelet has no token",
     "/health/ready": "readiness probe",
     "/health/deep": "versions and timings only, no content",
+    "/api/v1/health": (
+        "service health for the interface; reports whether dependencies answer, "
+        "never anything about content"
+    ),
     "/metrics": "Prometheus scrape; cluster-internal, counts only",
-    "/auth/config": "tells the browser where to authenticate — it cannot know yet",
-    "/auth/session": "this is where a token is obtained",
-    "/auth/session/refresh": "carries its own refresh credential",
+    "/api/v1/auth/config": "tells the browser where to authenticate — it cannot know yet",
+    "/api/v1/auth/session": "this is where a token is obtained",
+    "/api/v1/auth/session/refresh": "carries its own refresh credential",
 }
 
-#: Prefixes an ordinary member of staff must never reach. `/v1/ask`,
-#: `/v1/conversations` and `/v1/documents` are theirs; nothing below is.
-PRIVILEGED = ("/v1/admin", "/v1/security", "/v1/knowledge", "/v1/evaluation", "/v1/debug")
+#: Prefixes an ordinary member of staff must never reach. `/api/v1/ask`,
+#: `/api/v1/conversations` and `/api/v1/documents` are theirs; nothing below is.
+PRIVILEGED = (
+    "/api/v1/admin",
+    "/api/v1/security",
+    "/api/v1/knowledge",
+    "/api/v1/evaluation",
+    "/api/v1/debug",
+)
 
 #: Routes under a privileged prefix that are nonetheless user-facing, guarded by
 #: the caller's access list rather than by a role. Listed individually and with
 #: a reason, because "it lives under /v1/knowledge so it must be admin-only" is
 #: the assumption that would otherwise hide a genuinely missing guard.
-#: `test_acl_guarded_routes_still_enforce_acls` covers what role-checking cannot.
+#: What role-checking cannot cover is covered per-route instead:
+#: `test_knowledge_bases.py::TestCountsAreScopedToTheCaller` for the registry,
+#: and the document suites for the preview. `test_acl_guarded_exceptions_still_exist`
+#: below only keeps this list from outliving the routes on it.
 ACL_GUARDED: dict[str, str] = {
-    "/v1/knowledge/documents/{document_id}/preview": (
+    "/api/v1/knowledge-bases": (
+        "§5.4: the registry the settings modal lists. Read-only for everyone, "
+        "and every row it returns is already filtered by the caller's access "
+        "list — a source they can reach nothing in is absent rather than shown "
+        "empty. Note it only matches the privileged `/api/v1/knowledge` prefix "
+        "by accident of spelling; it is not under that router."
+    ),
+    "/api/v1/knowledge/documents/{document_id}/preview": (
         "FR-029: the extracted text behind a citation. Any member of staff may "
         "read it for a document their principals reach — that is the point of a "
         "citation being checkable — so it enforces the access list, not a role."
@@ -71,35 +90,27 @@ _SAMPLES = {
 
 
 def _routes() -> list[tuple[str, str]]:
-    """Read the routes off the built application.
+    """Read the routes off the built application's own OpenAPI document.
 
-    Walked recursively rather than read from ``app.routes``: FastAPI wraps an
-    included router in a container object that is not itself an ``APIRoute``,
-    so a flat pass finds only the four docs endpoints. The
-    ``test_the_enumeration_actually_found_routes`` check below exists because
-    that failure is silent — every other test in this file would pass on an
-    empty list.
+    Not by walking `app.routes`: FastAPI wraps an included router in a container
+    whose `original_router` still carries *router-relative* paths, so a walk
+    returns `/v1/x` for a route actually served at `/api/v1/x` — every request
+    then 404s and the suite reports a guard failure that is really a test bug.
+    The OpenAPI document is the only place the fully-resolved paths exist.
+
+    `test_the_enumeration_actually_found_routes` below exists because this
+    failure mode is silent: an empty list makes every other test in the file
+    pass vacuously.
     """
+    spec = create_app().openapi()
     out: list[tuple[str, str]] = []
-    seen: set[int] = set()
-
-    def walk(node: object) -> None:
-        if id(node) in seen:
-            return
-        seen.add(id(node))
-        if isinstance(node, APIRoute):
-            if not node.path.startswith(("/openapi", "/docs", "/redoc")):
-                for method in sorted(node.methods - {"HEAD", "OPTIONS"}):
-                    out.append((method, node.path))
-            return
-        for attr in ("routes", "original_router"):
-            child = getattr(node, attr, None)
-            if child is None:
+    for path, operations in spec["paths"].items():
+        if path.startswith(("/openapi", "/docs", "/redoc")):
+            continue
+        for method in operations:
+            if method.upper() in {"HEAD", "OPTIONS"}:
                 continue
-            for item in child if isinstance(child, list) else [child]:
-                walk(item)
-
-    walk(create_app())
+            out.append((method.upper(), path))
     return sorted(set(out))
 
 
@@ -190,7 +201,7 @@ class TestAclGuardedRoutes:
         # theirs intersects it.
         document_id = await doc_id_of("conf-budget-reallocation")
         response = await client.get(
-            f"/v1/knowledge/documents/{document_id}/preview",
+            f"/api/v1/knowledge/documents/{document_id}/preview",
             headers={"Authorization": f"Bearer {token('staff.misd')}"},
         )
         assert response.status_code != 200, (
@@ -204,7 +215,7 @@ class TestAclGuardedRoutes:
         """The negative case alone would pass if the route were simply broken."""
         document_id = await doc_id_of("conf-budget-reallocation")
         response = await client.get(
-            f"/v1/knowledge/documents/{document_id}/preview",
+            f"/api/v1/knowledge/documents/{document_id}/preview",
             headers={"Authorization": f"Bearer {token('staff.finance')}"},
         )
         assert response.status_code == 200, (
@@ -214,5 +225,5 @@ class TestAclGuardedRoutes:
 
     async def test_preview_is_refused_without_a_token(self, client, doc_id_of) -> None:
         document_id = await doc_id_of("conf-budget-reallocation")
-        response = await client.get(f"/v1/knowledge/documents/{document_id}/preview")
+        response = await client.get(f"/api/v1/knowledge/documents/{document_id}/preview")
         assert response.status_code == 401

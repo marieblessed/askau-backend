@@ -84,9 +84,7 @@ def upgrade() -> None:
     """)
 
     for table, value in PARTITIONS.items():
-        op.execute(
-            f"CREATE TABLE {table} PARTITION OF chunks FOR VALUES IN ('{value}')"
-        )
+        op.execute(f"CREATE TABLE {table} PARTITION OF chunks FOR VALUES IN ('{value}')")
 
     for table in PARTITIONS:
         # Cosine distance: embeddings are normalized, and cosine is what the
@@ -108,8 +106,7 @@ def upgrade() -> None:
         # Trigram fallback carries fuzzy matching for languages with no stemmer
         # (Kiswahili, Amharic), where lang_config resolves to 'simple'.
         op.execute(
-            f"CREATE INDEX ix_{table}_content_trgm ON {table} "
-            f"USING gin (content gin_trgm_ops)"
+            f"CREATE INDEX ix_{table}_content_trgm ON {table} USING gin (content gin_trgm_ops)"
         )
 
     _create_app_role_and_rls()

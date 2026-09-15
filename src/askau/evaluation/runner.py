@@ -53,10 +53,71 @@ class QuestionResult:
     passed: bool
     actual_state: str
     retrieved_families: tuple[str, ...] = ()
+    #: Carried onto the result so precision can be computed without re-reading
+    #: the question set.
+    expected_families: tuple[str, ...] = ()
     failure: str | None = None
     latency_ms: int = 0
     groundedness: float | None = None
+    #: Sentences the lexical measure could not match to the evidence. Carried so
+    #: a low score can be read rather than guessed at: an answer that drifted
+    #: from its sources and one that reasoned about which source it preferred
+    #: both land below 1.0, and only these sentences separate them.
+    unsupported: tuple[str, ...] = ()
     known_limitation: str | None = None
+
+
+def _as_sentences(raw: object) -> tuple[str, ...]:
+    """Narrow the untyped diagnostics bag, the way `_topics_of` does elsewhere."""
+    if isinstance(raw, tuple | list):
+        return tuple(str(x) for x in raw)
+    return ()
+
+
+def _precision(results: list[QuestionResult]) -> float | None:
+    """Retrieved-and-wanted over retrieved, across questions that declare both.
+
+    Read this alongside `retrieval_top_k`, not on its own. Retrieval returns a
+    fixed number of chunks, so a question expecting one document out of eight
+    returned is capped at 12% however perfectly they are ranked. This number
+    therefore mostly measures how much context is handed to the model, and
+    barely moves when ranking improves — which is exactly what was observed
+    switching from hash embeddings to bge-m3 (18% → 19%).
+
+    Kept because "how much of what we send is relevant" is still worth knowing —
+    it is the model's signal-to-noise ratio. But `mrr` below is the number that
+    answers whether retrieval is any good.
+    """
+    scored = [r for r in results if r.expected_families and r.retrieved_families]
+    if not scored:
+        return None
+    per_question = [
+        len(set(r.retrieved_families) & set(r.expected_families)) / len(set(r.retrieved_families))
+        for r in scored
+    ]
+    return sum(per_question) / len(per_question)
+
+
+def _mrr(results: list[QuestionResult]) -> float | None:
+    """Mean reciprocal rank of the first wanted document.
+
+    The ranking metric. 1.0 means the right document was always first; 0.5 means
+    typically second; 0.0 means never retrieved at all. Unlike precision it is
+    independent of how many chunks are returned, so it isolates the thing the
+    semantic arm is actually responsible for.
+    """
+    scored = [r for r in results if r.expected_families and r.retrieved_families]
+    if not scored:
+        return None
+
+    def reciprocal(r: QuestionResult) -> float:
+        wanted = set(r.expected_families)
+        for position, title in enumerate(r.retrieved_families, start=1):
+            if title in wanted:
+                return 1.0 / position
+        return 0.0
+
+    return sum(reciprocal(r) for r in scored) / len(scored)
 
 
 @dataclass(slots=True)
@@ -102,12 +163,31 @@ class EvalReport:
             "groundedness": (
                 sum(r.groundedness or 0 for r in answered) / len(answered) if answered else None
             ),
+            # The worst single answer, not the average.
+            #
+            # An average hides the case that matters: nineteen good answers and
+            # one that wandered off its sources average to 95%, and 95% passes.
+            # The measure is a drift detector, and drift happens to individual
+            # answers, so the gate reads the worst one.
+            "min_groundedness": (min(r.groundedness or 0 for r in answered) if answered else None),
             "p95_latency_ms": (
                 sorted(r.latency_ms for r in self.results)[int(len(self.results) * 0.95) - 1]
                 if self.results
                 else None
             ),
             "retrieval_checked": len(recall_scored),
+            # Of the documents retrieved for questions that declare what they
+            # expect, what fraction were actually wanted.
+            #
+            # Recall — "did we find the right document" — is what `pass_rate`
+            # already covers, and the keyword arm alone satisfies it for most
+            # questions. Precision is what the *semantic* arm is for, and it is
+            # the number that collapses when embeddings carry no meaning: a hash
+            # embedder fills the remaining slots with whatever happens to hash
+            # nearby, so the right answer arrives surrounded by noise. A reader
+            # sees that noise as "sources", which is worse than a shorter answer.
+            "retrieval_precision": _precision(self.results),
+            "mrr": _mrr(self.results),
         }
 
     def gate(self, thresholds: dict[str, float]) -> tuple[bool, list[str]]:
@@ -128,11 +208,29 @@ class EvalReport:
         m = self.metrics()
         if m["pass_rate"] is not None and m["pass_rate"] < thresholds.get("pass_rate", 0.9):
             breaches.append(f"pass rate {m['pass_rate']:.0%} below {thresholds['pass_rate']:.0%}")
-        if m["groundedness"] is not None and m["groundedness"] < thresholds.get(
-            "groundedness", 0.9
-        ):
+        # Gated on the worst answer, not the mean.
+        #
+        # The mean was thresholded at 90% for as long as the answer generator was
+        # a stub that returned retrieved text verbatim and therefore scored 1.00
+        # on every question by construction. That number was never measured
+        # against a model that paraphrases; the first real one produced 86% and
+        # failed a gate it had no way of passing.
+        #
+        # What the lexical measure is actually for — its own module says so — is
+        # catching an answer that has drifted away from its sources. It does not
+        # claim to catch subtle misstatement, and it penalises a model for
+        # explaining which source it preferred, because that sentence's words are
+        # not in the evidence. So it is gated as a floor: no single answer may
+        # fall below `min_groundedness`, and the mean is reported but not gated.
+        #
+        # A real quality bar needs the model-based judge that `rag/grounding.py`
+        # refers to and which does not exist. Until it does, this gate catches
+        # drift and makes no claim about quality.
+        floor = thresholds.get("min_groundedness")
+        worst = m["min_groundedness"]
+        if floor is not None and worst is not None and worst < floor:
             breaches.append(
-                f"groundedness {m['groundedness']:.0%} below {thresholds['groundedness']:.0%}"
+                f"an answer scored {worst:.0%} groundedness, below the {floor:.0%} drift floor"
             )
         return (not breaches, breaches)
 
@@ -176,19 +274,24 @@ class EvaluationRunner:
         answer, _ = await self._orch.answer(q.question, authz)
         latency = int((time.perf_counter() - started) * 1000)
 
-        families = tuple(
-            sorted(
-                {c.document_title for c in (answer.retrieval.chunks if answer.retrieval else ())}
-            )
-        )
+        # In *rank order*, de-duplicated, not sorted alphabetically. Sorting
+        # discards the one thing that distinguishes good ranking from bad: a set
+        # containing the right document says nothing about whether it was first
+        # or eighth.
+        seen: dict[str, None] = {}
+        for c in answer.retrieval.chunks if answer.retrieval else ():
+            seen.setdefault(c.document_title, None)
+        families = tuple(seen)
         result = QuestionResult(
             question_id=q.id,
             question=q.question,
             passed=True,
             actual_state=answer.state.value,
             retrieved_families=families,
+            expected_families=q.expected_families,
             latency_ms=latency,
             groundedness=answer.groundedness,
+            unsupported=_as_sentences(answer.diagnostics.get("unsupported_sentences")),
             known_limitation=q.known_limitation,
         )
 

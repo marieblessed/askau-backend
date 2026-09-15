@@ -216,7 +216,7 @@ async def _index_document(
                 "title": doc.title,
                 "dtype": doc.doc_type,
                 "lang": doc.language,
-                "uri": f"https://sharepoint.africanunion.org/policies/{doc.key}",
+                "uri": f"https://aucdocs.blob.core.windows.net/policies/{doc.key}",
                 "body": doc.body,
                 "cls": doc.classification,
                 "dept": doc.department,
@@ -280,13 +280,13 @@ async def _index_document(
                      heading_path, section_ref, page_from, page_to, char_start, char_end,
                      classification, lifecycle, department, language,
                      effective_from, effective_to, version_seq, is_current,
-                     acl_principals, embedding, lang_config, tsv)
+                     acl_principals, embedding, embedding_model, lang_config, tsv)
                     VALUES
                     (:doc, :fam, :ord, :content, :tokens,
                      CAST(:heads AS text[]), :section, :pfrom, :pto, :cstart, :cend,
                      :cls, CAST(:life AS lifecycle_status), :dept, :lang,
                      :efrom, :eto, :vseq, :current,
-                     CAST(:acl AS bigint[]), CAST(:emb AS vector),
+                     CAST(:acl AS bigint[]), CAST(:emb AS vector), :embmodel,
                      CAST(:tscfg AS regconfig),
                      to_tsvector(CAST(:tscfg AS regconfig), :content))"""),
             {
@@ -311,6 +311,8 @@ async def _index_document(
                 "current": is_current,
                 "acl": acl,
                 "emb": "[" + ",".join(f"{v:.7g}" for v in vector) + "]",
+                # Provenance travels with the vector — see migration 0012.
+                "embmodel": embedder.model_name,
                 "tscfg": ts_config,
             },
         )

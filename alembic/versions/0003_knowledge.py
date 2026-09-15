@@ -116,7 +116,9 @@ def upgrade() -> None:
         WHERE lifecycle IN ('active','review_required')
     """)
     op.execute("CREATE INDEX ix_documents_title_trgm ON documents USING gin (title gin_trgm_ops)")
-    op.execute("CREATE INDEX ix_documents_review ON documents (review_required) WHERE review_required")
+    op.execute(
+        "CREATE INDEX ix_documents_review ON documents (review_required) WHERE review_required"
+    )
 
     # The authoritative access list. chunks.acl_principals is DERIVED from this
     # and never edited directly — the reconciler is the only writer of that array.

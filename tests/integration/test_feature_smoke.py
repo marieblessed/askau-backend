@@ -30,25 +30,25 @@ def auth(tok: str) -> dict[str, str]:
 #: knowledge, system and security administration precisely so that no single
 #: account can both change the corpus and erase the record of having done so.
 READS: list[tuple[str, str]] = [
-    ("/v1/admin/overview", "admin.knowledge"),
-    ("/v1/admin/documents", "admin.knowledge"),
-    ("/v1/admin/sources", "admin.knowledge"),
-    ("/v1/admin/ingestion/runs", "admin.knowledge"),
-    ("/v1/admin/ingestion/failures", "admin.knowledge"),
-    ("/v1/admin/quality", "admin.knowledge"),
-    ("/v1/admin/feedback", "admin.knowledge"),
-    ("/v1/admin/config", "admin.system"),
-    ("/v1/admin/usage", "admin.system"),
-    ("/v1/admin/metrics", "admin.system"),
-    ("/v1/knowledge/sources", "admin.knowledge"),
-    ("/v1/security/audit-events", "admin.security"),
-    ("/v1/security/access-denials", "admin.security"),
-    ("/v1/security/ai-safety-events", "admin.security"),
-    ("/v1/security/retention", "admin.security"),
-    ("/v1/security/audit-events/export", "admin.security"),
-    ("/v1/evaluation/datasets", "admin.system"),
-    ("/v1/conversations", "staff.finance"),
-    ("/v1/debug/retrieve?q=travel", "admin.system"),
+    ("/api/v1/admin/overview", "admin.knowledge"),
+    ("/api/v1/admin/documents", "admin.knowledge"),
+    ("/api/v1/admin/sources", "admin.knowledge"),
+    ("/api/v1/admin/ingestion/runs", "admin.knowledge"),
+    ("/api/v1/admin/ingestion/failures", "admin.knowledge"),
+    ("/api/v1/admin/quality", "admin.knowledge"),
+    ("/api/v1/admin/feedback", "admin.knowledge"),
+    ("/api/v1/admin/config", "admin.system"),
+    ("/api/v1/admin/usage", "admin.system"),
+    ("/api/v1/admin/metrics", "admin.system"),
+    ("/api/v1/knowledge/sources", "admin.knowledge"),
+    ("/api/v1/security/audit-events", "admin.security"),
+    ("/api/v1/security/access-denials", "admin.security"),
+    ("/api/v1/security/ai-safety-events", "admin.security"),
+    ("/api/v1/security/retention", "admin.security"),
+    ("/api/v1/security/audit-events/export", "admin.security"),
+    ("/api/v1/evaluation/datasets", "admin.system"),
+    ("/api/v1/conversations", "staff.finance"),
+    ("/api/v1/debug/retrieve?q=travel", "admin.system"),
 ]
 
 
@@ -85,7 +85,7 @@ class TestDocumentDetail:
 
     async def test_admin_document_search(self, client, token) -> None:
         response = await client.get(
-            "/v1/admin/documents?q=travel", headers=auth(token("admin.knowledge"))
+            "/api/v1/admin/documents?q=travel", headers=auth(token("admin.knowledge"))
         )
         assert response.status_code == 200
         assert response.json()["documents"], "no documents matched a known-present title"
@@ -95,7 +95,7 @@ class TestDocumentDetail:
         document genuinely has a version chain to return."""
         document_id = await doc_id_of("int-travel-v2")
         response = await client.get(
-            f"/v1/knowledge/documents/{document_id}/versions",
+            f"/api/v1/knowledge/documents/{document_id}/versions",
             headers=auth(token("admin.knowledge")),
         )
         assert response.status_code == 200
@@ -103,13 +103,13 @@ class TestDocumentDetail:
     async def test_user_document_metadata(self, client, token, doc_id_of) -> None:
         document_id = await doc_id_of("int-travel-v2")
         response = await client.get(
-            f"/v1/documents/{document_id}", headers=auth(token("staff.finance"))
+            f"/api/v1/documents/{document_id}", headers=auth(token("staff.finance"))
         )
         assert response.status_code == 200
 
 
 class TestClearance:
-    """`/auth/me.max_classification` is derived, not declared.
+    """`/api/v1/auth/me.max_classification` is derived, not declared.
 
     It was hardcoded to `internal` — plausible enough to survive review, wrong
     for anyone cleared above or below it. The interface uses this value to
@@ -119,21 +119,21 @@ class TestClearance:
     """
 
     async def test_reflects_what_the_user_can_actually_reach(self, client, token) -> None:
-        finance = (await client.get("/auth/me", headers=auth(token("staff.finance")))).json()
-        misd = (await client.get("/auth/me", headers=auth(token("staff.misd")))).json()
+        finance = (await client.get("/api/v1/auth/me", headers=auth(token("staff.finance")))).json()
+        misd = (await client.get("/api/v1/auth/me", headers=auth(token("staff.misd")))).json()
 
         # Finance is on the access list of a confidential document in the seed;
         # MISD is not on any. If these ever match, the value is hardcoded again.
-        assert finance["max_classification"] == "confidential", finance
-        assert misd["max_classification"] == "internal", misd
-        assert finance["max_classification"] != misd["max_classification"], (
+        assert finance["maxClassification"] == "confidential", finance
+        assert misd["maxClassification"] == "internal", misd
+        assert finance["maxClassification"] != misd["maxClassification"], (
             "clearance is identical for two deliberately different identities"
         )
 
     async def test_never_exposes_the_principal_set(self, client, token) -> None:
-        body = (await client.get("/auth/me", headers=auth(token("staff.finance")))).json()
+        body = (await client.get("/api/v1/auth/me", headers=auth(token("staff.finance")))).json()
         assert "principals" not in body
-        assert isinstance(body["principal_count"], int)
+        assert isinstance(body["principalCount"], int)
 
 
 class TestConversationLifecycle:
@@ -142,12 +142,12 @@ class TestConversationLifecycle:
     async def test_create_ask_read_rename_delete(self, client, token) -> None:
         headers = auth(token("staff.finance"))
 
-        created = await client.post("/v1/conversations", json={}, headers=headers)
+        created = await client.post("/api/v1/conversations", json={}, headers=headers)
         assert created.status_code == 201, created.text
         conversation_id = created.json()["id"]
 
         answered = await client.post(
-            f"/v1/conversations/{conversation_id}/messages",
+            f"/api/v1/conversations/{conversation_id}/messages",
             # Deliberately *not* a per-diem or travel question: the seed carries
             # a conflicting policy pair on that subject, so those return
             # `conflict` by design. Asserting `grounded` there would be testing
@@ -157,27 +157,27 @@ class TestConversationLifecycle:
         )
         assert answered.status_code == 200, answered.text
         payload = answered.json()
-        assert payload["answer_state"] == "grounded", payload["answer_state"]
+        assert payload["answerState"] == "grounded", payload["answerState"]
         assert payload["citations"], "a grounded answer with no citations is not grounded"
         # Persisted, not just returned — the feedback and history features both
         # depend on this id existing afterwards.
-        assert payload["message_id"], "message was not persisted"
+        assert payload["messageId"], "message was not persisted"
 
-        fetched = await client.get(f"/v1/conversations/{conversation_id}", headers=headers)
+        fetched = await client.get(f"/api/v1/conversations/{conversation_id}", headers=headers)
         assert fetched.status_code == 200
         assert len(fetched.json()["messages"]) >= 2, "question and answer should both persist"
 
         renamed = await client.patch(
-            f"/v1/conversations/{conversation_id}",
+            f"/api/v1/conversations/{conversation_id}",
             json={"title": "Per diem enquiry"},
             headers=headers,
         )
         assert renamed.status_code in {200, 204}
 
-        removed = await client.delete(f"/v1/conversations/{conversation_id}", headers=headers)
+        removed = await client.delete(f"/api/v1/conversations/{conversation_id}", headers=headers)
         assert removed.status_code in {200, 204}
 
-        gone = await client.get(f"/v1/conversations/{conversation_id}", headers=headers)
+        gone = await client.get(f"/api/v1/conversations/{conversation_id}", headers=headers)
         assert gone.status_code == 404, "deleted conversation is still readable"
 
 
@@ -191,17 +191,17 @@ class TestConflictDetection:
 
     async def test_conflicting_policies_surface_as_conflict(self, client, token) -> None:
         headers = auth(token("staff.finance"))
-        conversation_id = (await client.post("/v1/conversations", json={}, headers=headers)).json()[
-            "id"
-        ]
+        conversation_id = (
+            await client.post("/api/v1/conversations", json={}, headers=headers)
+        ).json()["id"]
         answered = await client.post(
-            f"/v1/conversations/{conversation_id}/messages",
+            f"/api/v1/conversations/{conversation_id}/messages",
             json={"content": "What is the daily subsistence allowance for continental travel?"},
             headers=headers,
         )
         payload = answered.json()
-        assert payload["answer_state"] == "conflict", (
-            f"expected the seeded contradiction to be detected, got {payload['answer_state']}"
+        assert payload["answerState"] == "conflict", (
+            f"expected the seeded contradiction to be detected, got {payload['answerState']}"
         )
         assert len(payload["citations"]) >= 2, (
             "a conflict must cite both sides — one citation cannot show a disagreement"
@@ -213,23 +213,23 @@ class TestFeedback:
 
     async def test_rate_then_withdraw(self, client, token) -> None:
         headers = auth(token("staff.finance"))
-        created = await client.post("/v1/conversations", json={}, headers=headers)
+        created = await client.post("/api/v1/conversations", json={}, headers=headers)
         conversation_id = created.json()["id"]
         answered = await client.post(
-            f"/v1/conversations/{conversation_id}/messages",
+            f"/api/v1/conversations/{conversation_id}/messages",
             json={"content": "What is the annual leave entitlement?"},
             headers=headers,
         )
-        message_id = answered.json()["message_id"]
+        message_id = answered.json()["messageId"]
 
         rated = await client.post(
-            f"/v1/messages/{message_id}/feedback",
+            f"/api/v1/messages/{message_id}/feedback",
             json={"rating": "not_helpful", "reason": "missing_information"},
             headers=headers,
         )
         assert rated.status_code in {200, 201, 204}, rated.text
 
-        withdrawn = await client.delete(f"/v1/messages/{message_id}/feedback", headers=headers)
+        withdrawn = await client.delete(f"/api/v1/messages/{message_id}/feedback", headers=headers)
         assert withdrawn.status_code in {200, 204}, withdrawn.text
 
 
@@ -238,13 +238,13 @@ class TestStreaming:
 
     async def test_stream_emits_done_with_an_answer(self, client, token) -> None:
         headers = auth(token("staff.finance"))
-        conversation_id = (await client.post("/v1/conversations", json={}, headers=headers)).json()[
-            "id"
-        ]
+        conversation_id = (
+            await client.post("/api/v1/conversations", json={}, headers=headers)
+        ).json()["id"]
 
         async with client.stream(
             "POST",
-            f"/v1/conversations/{conversation_id}/messages/stream",
+            f"/api/v1/conversations/{conversation_id}/messages/stream",
             json={"content": "What is the daily subsistence allowance?"},
             headers=headers,
         ) as response:
