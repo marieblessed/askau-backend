@@ -25,3 +25,12 @@ htmlcov/
 .claude/
 *.iml
 .DS_Store
+
+# ── the requirements source documents ─────────────────────────────────────
+# The AUC's originals: ~40 MB of mostly-images. Git stores binaries whole and
+# forever, so every clone would pay for them in perpetuity, and the only way to
+# remove them afterwards is a history rewrite that breaks everyone who already
+# cloned. Nothing in the build reads them — they are read by people. See
+# docs/README.md for how to obtain them.
+docs/*.pdf
+docs/*.docx

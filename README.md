@@ -5,6 +5,13 @@ assistant for the African Union Commission. A FastAPI service providing
 authenticated, permission-aware retrieval and grounded, cited answers over
 approved AUC knowledge sources.
 
+| | |
+|---|---|
+| **Run it locally** | [docs/local-setup.md](docs/local-setup.md) |
+| **Every environment variable** | [docs/configuration.md](docs/configuration.md) |
+| **Connect it to Azure and Entra** | [docs/azure-setup.md](docs/azure-setup.md) |
+| **Why it is built this way** | [docs/architecture/](docs/architecture/README.md) |
+
 ## The one thing to understand
 
 **Authorization is a SQL predicate, never a model judgment.** The retrieval query
