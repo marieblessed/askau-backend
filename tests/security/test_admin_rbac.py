@@ -9,7 +9,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
-pytestmark = [pytest.mark.integration, pytest.mark.security]
+from tests.conftest import requires_db
+
+# `requires_db` was missing here and present on every other integration module.
+# Without a database this file did not skip — it produced 23 errors and a
+# failure, which for someone running the suite on a fresh checkout looks like a
+# broken clone rather than an absent service.
+pytestmark = [pytest.mark.integration, pytest.mark.security, requires_db]
 
 
 def auth(token: str) -> dict[str, str]:
@@ -21,25 +27,25 @@ def auth(token: str) -> dict[str, str]:
 #: reverse holds too.
 MATRIX: list[tuple[str, str, int]] = [
     # end users reach nothing administrative
-    ("staff.misd", "/v1/admin/overview", 403),
-    ("staff.misd", "/v1/admin/documents", 403),
-    ("staff.misd", "/v1/admin/ingestion/runs", 403),
-    ("staff.misd", "/v1/admin/usage", 403),
-    ("staff.misd", "/v1/security/audit-events", 403),
+    ("staff.misd", "/api/v1/admin/overview", 403),
+    ("staff.misd", "/api/v1/admin/documents", 403),
+    ("staff.misd", "/api/v1/admin/ingestion/runs", 403),
+    ("staff.misd", "/api/v1/admin/usage", 403),
+    ("staff.misd", "/api/v1/security/audit-events", 403),
     # knowledge admin: the knowledge base, not usage or audit
-    ("admin.knowledge", "/v1/admin/overview", 200),
-    ("admin.knowledge", "/v1/admin/documents", 200),
-    ("admin.knowledge", "/v1/admin/ingestion/runs", 200),
-    ("admin.knowledge", "/v1/admin/usage", 403),
-    ("admin.knowledge", "/v1/security/audit-events", 403),
+    ("admin.knowledge", "/api/v1/admin/overview", 200),
+    ("admin.knowledge", "/api/v1/admin/documents", 200),
+    ("admin.knowledge", "/api/v1/admin/ingestion/runs", 200),
+    ("admin.knowledge", "/api/v1/admin/usage", 403),
+    ("admin.knowledge", "/api/v1/security/audit-events", 403),
     # system admin: adds usage, still not the audit log
-    ("admin.system", "/v1/admin/usage", 200),
-    ("admin.system", "/v1/security/audit-events", 403),
+    ("admin.system", "/api/v1/admin/usage", 200),
+    ("admin.system", "/api/v1/security/audit-events", 403),
     # security admin: the audit log, and *only* the audit log
-    ("admin.security", "/v1/security/audit-events", 200),
-    ("admin.security", "/v1/security/audit-events/export", 200),
-    ("admin.security", "/v1/admin/overview", 403),
-    ("admin.security", "/v1/admin/usage", 403),
+    ("admin.security", "/api/v1/security/audit-events", 200),
+    ("admin.security", "/api/v1/security/audit-events/export", 200),
+    ("admin.security", "/api/v1/admin/overview", 403),
+    ("admin.security", "/api/v1/admin/usage", 403),
 ]
 
 
@@ -52,7 +58,7 @@ async def test_role_matrix(
 
 
 async def test_unauthenticated_is_rejected(client: httpx.AsyncClient) -> None:
-    assert (await client.get("/v1/admin/overview")).status_code == 401
+    assert (await client.get("/api/v1/admin/overview")).status_code == 401
 
 
 class TestAuditIsAppendOnly:
@@ -64,7 +70,7 @@ class TestAuditIsAppendOnly:
         self, client: httpx.AsyncClient, token, method: str
     ) -> None:
         resp = await getattr(client, method)(
-            "/v1/security/audit-events", headers=auth(token("admin.security"))
+            "/api/v1/security/audit-events", headers=auth(token("admin.security"))
         )
         # 405 (no such method) or 404 — never 2xx.
         assert resp.status_code >= 400
@@ -97,7 +103,7 @@ class TestAdminSurfacesExcludeUserContent:
         self, client: httpx.AsyncClient, token
     ) -> None:
         body = (
-            await client.get("/v1/admin/overview", headers=auth(token("admin.knowledge")))
+            await client.get("/api/v1/admin/overview", headers=auth(token("admin.knowledge")))
         ).text.lower()
         for leaked in ("question", "answer", "conversation", "message_content"):
             assert leaked not in body
@@ -109,13 +115,13 @@ class TestAdminSurfacesExcludeUserContent:
         retrieved — never the wording of the question."""
         asker = token("staff.misd")
         await client.post(
-            "/v1/ask",
+            "/api/v1/ask",
             headers=auth(asker),
             json={"content": "What is the annual leave entitlement for probation?"},
         )
         body = (
             await client.get(
-                "/v1/security/audit-events?limit=200",
+                "/api/v1/security/audit-events?limit=200",
                 headers=auth(token("admin.security")),
             )
         ).text

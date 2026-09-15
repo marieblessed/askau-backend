@@ -15,10 +15,11 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import Field
 from sqlalchemy import text
 
 from askau.api.deps import AuthzDep
+from askau.api.schemas.wire import WireModel
 from askau.core.errors import NotFoundError
 from askau.core.rbac import require_knowledge_admin, require_system_admin
 from askau.settings import Settings
@@ -314,6 +315,49 @@ _REMEDIES: dict[str, str] = {
     "too_large": "Above the size ceiling. Split it, or raise the limit for this source.",
     "extraction_failed": "The file parsed as its format but could not be read — likely corrupt.",
     "encrypted": "Password-protected. Ask the owner for an unprotected copy.",
+    # ── Codes the connector ingestion path emits ────────────────────────────
+    #
+    # These were all missing, and the reason is instructive: nothing could run
+    # connector ingestion at all until `make ingest` existed, so no run had ever
+    # produced one of them and the console had never been asked. The first real
+    # sync against a live library produced `fetch_error` and the console
+    # answered "No remedy recorded for this code."
+    #
+    # `extraction_error` is not a duplicate of `extraction_failed` above — it is
+    # the code the pipeline actually writes. The near-miss is exactly why
+    # `test_every_emitted_code_has_a_remedy` now compares the two sets rather
+    # than trusting that a plausible-looking key covers it.
+    "empty_file": "The file is zero bytes. Ask the source owner to re-upload it.",
+    "extraction_error": (
+        "Extraction raised on a file of a supported type — usually a truncated "
+        "download or a malformed document. Reprocess it; if it fails again, ask "
+        "the source owner for a fresh copy."
+    ),
+    "fetch_error": (
+        "The content could not be downloaded. Usually transient — a timeout or a "
+        "dropped connection — so reprocess first. If it persists, confirm the item "
+        "still exists and that the application's credentials still reach it."
+    ),
+    "access_unavailable": (
+        "The item's permissions could not be read, so its audience is unknown and it "
+        "was not ingested — deliberately, since guessing would risk disclosure. Grant "
+        "the application permission to read this item's sharing settings, or remove "
+        "the anonymous sharing link, then reprocess it."
+    ),
+    "invalid_classification": (
+        "The document declares a classification the schema does not have. Correct its "
+        "classification metadata at the source — the accepted values are public, internal, "
+        "confidential and highly_restricted — then reprocess it."
+    ),
+    "no_chunks": (
+        "Text was extracted but produced no chunks — typically a document of headings "
+        "with no body. Confirm the file has readable content."
+    ),
+    "ocr_unavailable": (
+        "The document needs OCR and no OCR service is configured. Set "
+        "ASKAU_OCR_PROVIDER and ASKAU_OCR_URL to a Tika container "
+        "(docs/architecture/16-host-dependencies.md), then reprocess."
+    ),
 }
 
 
@@ -587,7 +631,7 @@ async def metrics(
     }
 
 
-class TriageIn(BaseModel):
+class TriageIn(WireModel):
     resolution: str = Field(min_length=3, max_length=1000)
 
 

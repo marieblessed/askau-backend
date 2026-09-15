@@ -20,9 +20,6 @@ setup: $(VENV) ## Create the venv, install deps and pre-commit hooks
 run: ## Start the API with reload
 	$(VENV)/bin/uvicorn askau.main:app --reload --port 8080
 
-worker: ## Run the ingestion worker
-	$(PY) -m askau.workers.main
-
 migrate: ## Apply migrations to head
 	$(VENV)/bin/alembic upgrade head
 
@@ -34,6 +31,23 @@ migrate-reset: ## Drop everything and re-apply (destructive, dev only)
 
 seed: ## Load the synthetic corpus and test identities
 	$(PY) -m askau.scripts.seed
+
+reconcile-acls: ## Bring chunks.acl_principals back in step with document_acl
+	$(PY) -m askau.scripts.reconcile_acls
+
+provision-user: ## Create an AskAU account: make provision-user OID=... EMAIL=... NAME="..." [DEPARTMENT=... JOB_TITLE=... ROLES="end_user knowledge_admin" DRY_RUN=1]
+	@$(PY) -m askau.scripts.provision_user \
+	  --oid "$(OID)" --email "$(EMAIL)" --name "$(NAME)" \
+	  $(if $(DEPARTMENT),--department "$(DEPARTMENT)") \
+	  $(if $(JOB_TITLE),--job-title "$(JOB_TITLE)") \
+	  $(foreach r,$(ROLES),--role $(r)) \
+	  $(if $(DRY_RUN),--dry-run)
+
+ingest: ## Run one ingestion pass: make ingest SOURCE=<uuid> [RUN=<uuid>]
+	$(PY) -m askau.scripts.ingest --source "$(SOURCE)" $(if $(RUN),--run "$(RUN)")
+
+dev-tokens: ## Every seeded identity as JSON, for the web client's .dev-tokens.json
+	@$(PY) -m askau.scripts.dev_tokens
 
 dev-token: ## Mint a dev bearer token: make dev-token USER=staff.misd
 	@$(PY) -m askau.scripts.dev_token $(USER)
@@ -67,20 +81,19 @@ contract-check: ## Fail if the committed contract has drifted
 
 check: lint typecheck test contract-check ## Everything CI will run
 
-.PHONY: help setup run worker migrate migrate-down migrate-reset seed dev-token \
-        test test-unit test-security lint fmt typecheck contract contract-check check dev-token-web
+.PHONY: help setup run migrate migrate-down migrate-reset seed reconcile-acls provision-user ingest dev-token dev-tokens \
+        test test-unit test-security lint fmt typecheck contract contract-check check eval-real
 
-dev-token-web: ## Refresh BOTH dev tokens in ../web/.env.local
-	@# Two tokens, because the console and the chat are used by different
-	@# people: §6.4 separates knowledge, system and security administration so
-	@# that no single account can both change the corpus and erase the record
-	@# of having done so. Refreshing only one leaves the other silently 401ing.
-	@$(PY) -m askau.scripts.dev_token $(or $(AS_USER),staff.finance) > /tmp/.askau-tok
-	@$(PY) -m askau.scripts.dev_token $(or $(AS_ADMIN),admin.system) > /tmp/.askau-tok-admin
-	@touch ../web/.env.local
-	@grep -vE '^ASKAU_DEV_TOKEN(_ADMIN)?=' ../web/.env.local > /tmp/.askau-env || true
-	@echo "ASKAU_DEV_TOKEN=$$(cat /tmp/.askau-tok)" >> /tmp/.askau-env
-	@echo "ASKAU_DEV_TOKEN_ADMIN=$$(cat /tmp/.askau-tok-admin)" >> /tmp/.askau-env
-	@mv /tmp/.askau-env ../web/.env.local
-	@rm -f /tmp/.askau-tok /tmp/.askau-tok-admin
-	@echo "30-day tokens written: $(or $(AS_USER),staff.finance) (chat), $(or $(AS_ADMIN),admin.system) (console)"
+eval-real: ## Re-seed with the real embedding model and measure retrieval quality
+	@# Two steps and not one, because the embedder is a property of the *corpus*:
+	@# a query embedded by bge-m3 cannot be compared against vectors written by
+	@# the hash embedder — they are points in unrelated spaces. Seeding and
+	@# evaluating must therefore agree, which is why this target does both and
+	@# why `make eval` alone would be a trap.
+	@echo "re-embedding with $(or $(MODEL),BAAI/bge-m3) — first run downloads ~2GB"
+	@ASKAU_EMBEDDING_PROVIDER=sentence_transformers ASKAU_EMBEDDING_MODEL=$(or $(MODEL),BAAI/bge-m3) \
+	  $(PY) -m askau.scripts.seed >/dev/null
+	@ASKAU_EMBEDDING_PROVIDER=sentence_transformers ASKAU_EMBEDDING_MODEL=$(or $(MODEL),BAAI/bge-m3) \
+	  $(PY) -m askau.evaluation.cli
+	@printf "\n  NOTE: the corpus is now embedded with %s.\n" "$(or $(MODEL),BAAI/bge-m3)"
+	@echo "        Run 'make seed' to return it to the hash embedder before 'make test'."

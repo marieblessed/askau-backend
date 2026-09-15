@@ -77,7 +77,7 @@ class TestFailureRollup:
     ) -> None:
         body = (
             await client.get(
-                "/v1/admin/ingestion/failures",
+                "/api/v1/admin/ingestion/failures",
                 headers=auth(token("admin.knowledge")),
             )
         ).json()
@@ -97,7 +97,7 @@ class TestFailureRollup:
         """
         body = (
             await client.get(
-                "/v1/admin/ingestion/failures",
+                "/api/v1/admin/ingestion/failures",
                 headers=auth(token("admin.knowledge")),
             )
         ).json()
@@ -114,7 +114,7 @@ class TestFailureRollup:
         not done it."""
         body = (
             await client.get(
-                "/v1/admin/ingestion/failures",
+                "/api/v1/admin/ingestion/failures",
                 headers=auth(token("admin.knowledge")),
             )
         ).json()
@@ -125,8 +125,42 @@ class TestFailureRollup:
                 f"{failure['error_code']} has no remedy — add one to _REMEDIES"
             )
 
+    def test_every_emitted_code_has_a_remedy(self) -> None:
+        """Static, and deliberately not routed through the API — nor async: it
+        reads source files, so there is no event loop to be on.
+
+        The behavioural test above can only fail once a run has actually
+        produced the code, which is how five missing remedies survived: nothing
+        could run connector ingestion until there was a runner, so
+        `fetch_error`, `access_unavailable`, `no_chunks`, `ocr_unavailable` and
+        `extraction_error` had never been emitted, and the console had never
+        been asked for their remedy.
+
+        This compares the two sets directly, so a new failure code fails the
+        build the moment it is written rather than the first time it happens in
+        production — which is the worst moment to discover that the console can
+        name a problem and not say what to do about it.
+        """
+        import re
+        from pathlib import Path
+
+        from askau.api.v1.routes.admin import _REMEDIES
+
+        root = Path(__file__).resolve().parents[2] / "src" / "askau" / "ingestion"
+        emitted: set[str] = set()
+        for path in root.rglob("*.py"):
+            emitted |= set(re.findall(r'code="([a-z_]+)"', path.read_text()))
+            emitted |= set(re.findall(r'ValidationFailure\(\s*"([a-z_]+)"', path.read_text()))
+
+        assert emitted, "found no failure codes to check — has the pattern changed?"
+        missing = sorted(emitted - set(_REMEDIES))
+        assert not missing, (
+            f"these failure codes have no remedy in _REMEDIES: {missing}. "
+            "An administrator sees the code and no action."
+        )
+
     async def test_end_user_is_refused(self, client: httpx.AsyncClient, token) -> None:
         resp = await client.get(
-            "/v1/admin/ingestion/failures", headers=auth(token("staff.finance"))
+            "/api/v1/admin/ingestion/failures", headers=auth(token("staff.finance"))
         )
         assert resp.status_code == 403

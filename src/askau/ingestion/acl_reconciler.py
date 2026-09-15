@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -100,9 +101,57 @@ WHERE id IN (
 """)
 
 
+class BlindReconcilerError(RuntimeError):
+    """The reconciler cannot see the chunks it is meant to reconcile.
+
+    Raised rather than returning an empty report, and the distinction is the
+    entire point of this class existing.
+
+    Row-level security on `chunks` restricts `askau_app` to rows overlapping the
+    session principals, and a maintenance pass sets none. Run on the application
+    connection the reconciler therefore reads **zero chunks**, finds no drift,
+    and reports "nothing to do" — which is indistinguishable, in every log and
+    every metric, from a corpus that is perfectly consistent.
+
+    That is the worst possible failure for this component. It is the control
+    that closes revocation windows, and a silent success means the window never
+    closes and nobody is told. So: see everything, or say so.
+    """
+
+
 class AclReconciler:
+    """Reconciles `chunks.acl_principals` against `document_acl` (FR-025).
+
+    **Requires a connection that RLS does not filter** — the migration/owner
+    role, not `askau_app`. Reconciliation is a maintenance operation over the
+    whole corpus, and the alternative to a privileged connection is granting the
+    application unfiltered SELECT on `chunks`, which would delete the second
+    lock the security model rests on.
+    """
+
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
+
+    async def _assert_can_see_chunks(self, conn: Any) -> None:
+        """Refuse to run blind.
+
+        The check is "documents exist but chunks are invisible", not "chunks is
+        empty": a genuinely empty corpus is a legitimate state on a fresh
+        deployment and must not raise.
+        """
+        visible = (await conn.execute(text("SELECT count(*) FROM chunks"))).scalar_one()
+        if visible:
+            return
+        indexed = (
+            await conn.execute(text("SELECT count(*) FROM documents WHERE chunk_count > 0"))
+        ).scalar_one()
+        if indexed:
+            raise BlindReconcilerError(
+                f"{indexed} indexed document(s) exist but no chunk rows are visible on this "
+                "connection. Row-level security is filtering them, which means a "
+                "reconciliation pass here would report no drift while every revocation "
+                "stayed open. Run the reconciler with the migration/owner connection."
+            )
 
     async def find_drift(self) -> tuple[list[str], list[str]]:
         """Documents needing reconciliation, as (revocations, grants).
@@ -111,6 +160,7 @@ class AclReconciler:
         is the half that must not wait.
         """
         async with self._engine.connect() as conn:
+            await self._assert_can_see_chunks(conn)
             rows = (await conn.execute(_DRIFT)).mappings().all()
         revocations = [r["document_id"] for r in rows if r["revoked"]]
         grants = [r["document_id"] for r in rows if r["granted"] and not r["revoked"]]

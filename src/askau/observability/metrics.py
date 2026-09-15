@@ -30,6 +30,21 @@ FROM messages
 WHERE created_at > now() - interval '1 hour'
 """)
 
+#: ACL synchronisation drift (FR-025).
+#:
+#: Through a SECURITY DEFINER function, not a direct query, and the reason is
+#: worth keeping: RLS on `chunks` restricts `askau_app` to rows matching the
+#: session principals, and a scrape sets none. The obvious version of this
+#: query therefore returns 0 and NULL — both gauges reading zero for ever, not
+#: because the corpus is consistent but because the query can see nothing. A
+#: gauge that structurally cannot leave zero is worse than no gauge.
+#:
+#: Granting the app unfiltered SELECT on `chunks` would have been the other fix
+#: and would have deleted the second lock the security argument rests on. The
+#: function returns two integers and no rows — the same contract this endpoint
+#: already keeps. See migration 0015.
+_ACL = text("SELECT max_lag_seconds, documents_drifted FROM askau_acl_drift()")
+
 _CORPUS = text("""
 SELECT (SELECT count(*) FROM documents)                              AS documents,
        (SELECT count(*) FROM documents WHERE ingest_status='failed') AS failed,
@@ -44,6 +59,7 @@ async def render(engine: AsyncEngine) -> str:
     async with engine.connect() as conn:
         m = (await conn.execute(_QUERY)).mappings().one()
         c = (await conn.execute(_CORPUS)).mappings().one()
+        acl = (await conn.execute(_ACL)).mappings().one()
 
     lines = [
         "# HELP askau_answers_total Answers produced in the last hour, by state.",
@@ -70,5 +86,15 @@ async def render(engine: AsyncEngine) -> str:
         "# HELP askau_access_denials_total Unauthorized access attempts, last hour.",
         "# TYPE askau_access_denials_total counter",
         f"askau_access_denials_total {c['denials']}",
+        # The other one with a zero target, and the less obvious of the two.
+        # A denial is somebody being correctly refused; drift is somebody
+        # possibly *not* being refused, which produces no event to count.
+        "# HELP askau_acl_drift_documents Documents whose materialized ACL "
+        "disagrees with document_acl.",
+        "# TYPE askau_acl_drift_documents gauge",
+        f"askau_acl_drift_documents {acl['documents_drifted']}",
+        "# HELP askau_acl_sync_lag_seconds Age of the least recently synchronized chunk ACL.",
+        "# TYPE askau_acl_sync_lag_seconds gauge",
+        f"askau_acl_sync_lag_seconds {float(acl['max_lag_seconds']):.0f}",
     ]
     return "\n".join(lines) + "\n"
