@@ -191,7 +191,26 @@ class EntraTokenVerifier:
 
         return VerifiedIdentity(
             subject=str(claims.get("oid") or claims.get("sub", "")),
-            email=str(claims.get("preferred_username") or claims.get("email", "")),
+            # Four names for one thing, and the order matters.
+            #
+            # v2.0 tokens carry `preferred_username`; the v1.0 access tokens
+            # Entra actually issues for a custom API scope carry `upn` and
+            # `unique_name` instead. `email` is present only when the directory
+            # object has a mail attribute — which a cloud-only account created
+            # in the portal does not.
+            #
+            # With only the first two checked, every cloud-only user's audit row
+            # had a blank `actor_email`. Still attributable through
+            # `actor_user_id`, but an investigator reading the audit table sees
+            # an empty column where the person should be, which is most of the
+            # value of an audit trail.
+            email=str(
+                claims.get("preferred_username")
+                or claims.get("upn")
+                or claims.get("email")
+                or claims.get("unique_name")
+                or ""
+            ),
             display_name=str(claims.get("name", "")),
             groups=_groups_claim(claims),
             roles=tuple(claims.get("roles", ())),
