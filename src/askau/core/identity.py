@@ -31,9 +31,36 @@ class VerifiedIdentity:
     subject: str
     email: str
     display_name: str
-    groups: tuple[str, ...] = ()
+    #: The token's group claims, or **None when the claim was absent**.
+    #:
+    #: The distinction is load-bearing and easy to erase. Entra omits `groups`
+    #: entirely once a user belongs to more than roughly 200 groups, sending
+    #: `_claim_names` pointing at Graph instead. Collapsing that into an empty
+    #: tuple would tell `DirectorySync` the person is in no groups, and it would
+    #: dutifully remove every membership — from exactly the most
+    #: heavily-permissioned people in the organisation, silently, at sign-in.
+    #:
+    #: `None` means "we were not told"; `()` means "told, and none".
+    groups: tuple[str, ...] | None = ()
     roles: tuple[str, ...] = ()
     department: str | None = None
+
+
+def _groups_claim(claims: dict[str, Any]) -> tuple[str, ...] | None:
+    """The `groups` claim, or `None` when the token did not carry one.
+
+    See `VerifiedIdentity.groups` for why absence and emptiness must not be the
+    same value. `_claim_names` is Entra's marker for an overflowed claim; it is
+    checked explicitly so that case is unambiguous rather than inferred from a
+    missing key.
+    """
+    if "groups" in claims:
+        return tuple(claims["groups"] or ())
+    if "_claim_names" in claims or "_claim_sources" in claims:
+        # Overflowed: the real list is behind a Graph call this verifier does
+        # not make. Reported as unknown rather than empty.
+        return None
+    return None
 
 
 class TokenVerifier(Protocol):
@@ -62,7 +89,7 @@ class DevTokenVerifier:
             subject=str(claims["sub"]),
             email=str(claims.get("email", "")),
             display_name=str(claims.get("name", claims["sub"])),
-            groups=tuple(claims.get("groups", ())),
+            groups=_groups_claim(claims),
             roles=tuple(claims.get("roles", ())),
             department=claims.get("department"),
         )
@@ -166,7 +193,7 @@ class EntraTokenVerifier:
             subject=str(claims.get("oid") or claims.get("sub", "")),
             email=str(claims.get("preferred_username") or claims.get("email", "")),
             display_name=str(claims.get("name", "")),
-            groups=tuple(claims.get("groups", ())),
+            groups=_groups_claim(claims),
             roles=tuple(claims.get("roles", ())),
             department=claims.get("department"),
         )

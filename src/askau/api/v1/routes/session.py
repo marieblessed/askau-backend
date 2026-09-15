@@ -11,23 +11,27 @@ production, so this cannot become a live bypass.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
 from sqlalchemy import text
 
 from askau.api.deps import AuthzDep
+from askau.api.schemas.wire import WireModel
 from askau.audit.events import EventType
 from askau.audit.writer import AuditEvent
 from askau.core.errors import UnauthenticatedError
 from askau.core.redaction import hash_ip
+from askau.db.directory import DirectorySync, MembershipChange
 from askau.domain.enums import AuditOutcome
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+_log = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
 
-class SessionIn(BaseModel):
+class SessionIn(WireModel):
     """The verified bearer token. AskAU never handles the authorization code or
     a client secret — that exchange belongs to the browser and Entra."""
 
@@ -117,6 +121,24 @@ async def create_session(body: SessionIn, request: Request) -> dict[str, Any]:
             {"uid": user["id"]},
         )
 
+    # Group memberships, from the token, on every sign-in.
+    #
+    # Sign-in is the right moment and the only one available: the claims arrive
+    # here and nowhere else, and a session lasts eight hours — so a removal in
+    # Entra takes effect at the next sign-in rather than immediately. That
+    # window is a property of token-based authorization, not of this code, and
+    # closing it further would mean a Graph call on every request.
+    #
+    # Failure here is not allowed to fail the sign-in. The consequence is
+    # already safe: without a reconcile the person keeps the memberships they
+    # had, and a user with none is refused by `AuthorizationContext` rather than
+    # let through with an empty set.
+    membership = MembershipChange()
+    try:
+        membership = await DirectorySync(engine).reconcile(user["id"], identity.groups)
+    except Exception:
+        _log.warning("group reconciliation failed for %s", user["id"], exc_info=True)
+
     request.app.state.audit.record(
         AuditEvent(
             event_type=EventType.LOGIN,
@@ -125,6 +147,14 @@ async def create_session(body: SessionIn, request: Request) -> dict[str, Any]:
             actor_email=identity.email,
             resource_type="session",
             resource_id=session_id,
+            # What access this sign-in granted or withdrew. A membership change
+            # is an authorization change, and BR-008 wants those legible without
+            # diffing two snapshots of `user_principals`.
+            detail={
+                "groups_added": list(membership.added),
+                "groups_removed": list(membership.removed),
+                "groups_claim_absent": membership.skipped_no_claim,
+            },
         )
     )
     return {"session_id": session_id, "expires_in": 28_800}

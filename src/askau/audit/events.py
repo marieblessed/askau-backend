@@ -37,6 +37,7 @@ class EventType(StrEnum):
     SOURCE_CREATED = "admin.source_created"
     SOURCE_APPROVED = "admin.source_approved"
     REINDEX_TRIGGERED = "admin.reindex_triggered"
+    USER_PROVISIONED = "admin.user_provisioned"
     CONFIG_CHANGED = "admin.config_changed"
     CONVERSATION_DELETED = "conversation.deleted"
     FEEDBACK_SUBMITTED = "feedback.submitted"
@@ -60,6 +61,7 @@ CATEGORY_OF: dict[EventType, EventCategory] = {
     EventType.SOURCE_CREATED: EventCategory.ADMINISTRATION,
     EventType.SOURCE_APPROVED: EventCategory.ADMINISTRATION,
     EventType.REINDEX_TRIGGERED: EventCategory.ADMINISTRATION,
+    EventType.USER_PROVISIONED: EventCategory.ADMINISTRATION,
     EventType.CONFIG_CHANGED: EventCategory.CONFIGURATION,
     EventType.CONVERSATION_DELETED: EventCategory.QUERY,
     EventType.FEEDBACK_SUBMITTED: EventCategory.QUERY,
