@@ -75,7 +75,26 @@ def assess(
     if question:
         asked = discriminating_words(question)
         if asked:
-            corpus = discriminating_words(" ".join(c.content for c in result.chunks[:5]))
+            # Titles count as part of what a document says.
+            #
+            # They were excluded, and it rejected exactly the questions this
+            # corpus is full of. "What is the disciplinary procedure for staff
+            # members?" reduces to one discriminating word — `procedure`,
+            # `staff` and `members` are generic here — and the body of the
+            # matching document never uses it: it opens "on receipt of an
+            # allegation of misconduct". The word is in the title.
+            #
+            # With a single asked word the ratio is binary, so one absent term
+            # took the overlap to zero and an HR officer was told the material
+            # "does not discuss the subject" of a document named after her
+            # question. A reader sees the title on every citation; it is part of
+            # the document for the purpose of judging relevance.
+            #
+            # FR-009 is unaffected: "what is the capital of Brazil" matches no
+            # title in an AU corpus either.
+            corpus = discriminating_words(
+                " ".join(f"{c.document_title} {c.content}" for c in result.chunks[:5])
+            )
             overlap = len(asked & corpus) / len(asked)
             if overlap < t.min_lexical_overlap:
                 return EvidenceAssessment.insufficient(

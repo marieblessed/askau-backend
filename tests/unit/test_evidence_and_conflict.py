@@ -224,3 +224,54 @@ class TestAModelCannotSuppressAConflict:
         cited_both = conflict_mod.detect((a, b), retrieved)
 
         assert len(cited_a_only) == len(cited_b_only) == len(cited_both) == 1
+
+
+class TestTitlesCountAsWhatADocumentSays:
+    """The relevance check read chunk bodies and ignored titles.
+
+    "What is the disciplinary procedure for staff members?" reduces to one
+    discriminating word here — `procedure`, `staff` and `members` are generic
+    across an AU corpus. The document that answers it is *called* "Disciplinary
+    Procedure for Staff Members" and its body never uses the word: it opens "on
+    receipt of an allegation of misconduct".
+
+    With a single asked word the overlap ratio is binary, so that one absence
+    scored zero and the gate reported that the material "does not discuss the
+    subject of the question" — of a document named after the question. A reader
+    sees the title on every citation; it is part of the document.
+    """
+
+    def _titled(self, title: str, body: str) -> RetrievalResult:
+        base = chunk(1, body)
+        return result(
+            RetrievedChunk(
+                chunk_id=base.chunk_id,
+                document_id=base.document_id,
+                content=body,
+                score=0.03,
+                document_title=title,
+                source_uri=base.source_uri,
+                source_name=base.source_name,
+                classification=base.classification,
+            )
+        )
+
+    def test_a_title_match_is_evidence(self) -> None:
+        found = self._titled(
+            "Disciplinary Procedure for Staff Members",
+            "On receipt of an allegation of misconduct, the Directorate shall "
+            "appoint an investigating officer within ten working days.",
+        )
+        assert assess(
+            found, question="What is the disciplinary procedure for staff members?"
+        ).sufficient
+
+    def test_an_unrelated_question_is_still_refused(self) -> None:
+        """FR-009 is unaffected: matching no title and no body is still
+        off-topic, which is the whole point of the check."""
+        found = self._titled(
+            "Disciplinary Procedure for Staff Members",
+            "On receipt of an allegation of misconduct, the Directorate shall "
+            "appoint an investigating officer within ten working days.",
+        )
+        assert not assess(found, question="What is the capital of Brazil?").sufficient

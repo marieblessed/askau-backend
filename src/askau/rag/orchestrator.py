@@ -156,27 +156,6 @@ class RagOrchestrator:
 
         chunks = await self._rerank(question, retrieval, trace)
 
-        # FR-008, assessed BEFORE the evidence gate. Vagueness is a property of
-        # the question, not of what came back: "tell me about procedures"
-        # deserves a clarifying question whether retrieval found much or little,
-        # and answering it with "not enough evidence" tells the reader nothing
-        # they can act on. Assessed on the resolved query, so a follow-up that
-        # inherited its subject is no longer too thin.
-        ambiguity = clarify_mod.assess(resolution.query, retrieval)
-        if ambiguity.needed:
-            trace.total_ms = int((time.perf_counter() - started) * 1000)
-            return (
-                GroundedAnswer(
-                    state=AnswerState.CLARIFICATION_NEEDED,
-                    content=clarify_mod.message(ambiguity),
-                    retrieval=retrieval,
-                    # No evidence assessment: the gate has not run, because the
-                    # question was not specific enough to be worth assessing.
-                    diagnostics={"topics": ambiguity.topics},
-                ),
-                trace,
-            )
-
         # ── the gate. Nothing below this line runs on insufficient evidence. ──
         retrieval, chunks, assessment = await self._assess(
             question=question,
@@ -199,6 +178,33 @@ class RagOrchestrator:
                     retrieval=retrieval,
                     evidence=assessment,
                     diagnostics={"escalated": trace.escalated},
+                ),
+                trace,
+            )
+
+        # FR-008, assessed AFTER the gate, and the ordering is the fix.
+        #
+        # It used to run first, on the reasoning that vagueness is a property of
+        # the question rather than of what came back. True, but it produced two
+        # wrong answers. A reader with no access to the matching document was
+        # told their question was too general — the question was fine, they
+        # simply could not see the answer, and "refine your question" sends them
+        # in circles. And a thin-but-specific question whose answer was sitting
+        # first in the results was refused rather than answered.
+        #
+        # A clarifying question is an offer of a choice. It only makes sense
+        # once there is evidence the reader is allowed to see, and only when
+        # that evidence points more than one way.
+        ambiguity = clarify_mod.assess(resolution.query, retrieval)
+        if ambiguity.needed:
+            trace.total_ms = int((time.perf_counter() - started) * 1000)
+            return (
+                GroundedAnswer(
+                    state=AnswerState.CLARIFICATION_NEEDED,
+                    content=clarify_mod.message(ambiguity),
+                    retrieval=retrieval,
+                    evidence=assessment,
+                    diagnostics={"topics": ambiguity.topics},
                 ),
                 trace,
             )
@@ -274,19 +280,6 @@ class RagOrchestrator:
         trace.candidates_considered = retrieval.candidates_considered
         chunks = await self._rerank(question, retrieval, trace)
 
-        # Same order as the buffered path: clarification first, because vagueness
-        # is a property of the question rather than of what came back.
-        ambiguity = clarify_mod.assess(resolution.query, retrieval)
-        if ambiguity.needed:
-            trace.total_ms = elapsed()
-            yield GroundedAnswer(
-                state=AnswerState.CLARIFICATION_NEEDED,
-                content=clarify_mod.message(ambiguity),
-                retrieval=retrieval,
-                diagnostics={"topics": ambiguity.topics},
-            )
-            return
-
         retrieval, chunks, assessment = await self._assess(
             question=question,
             resolved=resolution.query,
@@ -306,6 +299,22 @@ class RagOrchestrator:
                 content=evidence_mod.INSUFFICIENT_EVIDENCE_MESSAGE,
                 retrieval=retrieval,
                 evidence=assessment,
+            )
+            return
+
+        # Same order as the buffered path, and for the same reason: a clarifying
+        # question is an offer of a choice, so it needs evidence the reader may
+        # see, pointing more than one way. See the buffered path for the two
+        # wrong answers the previous ordering produced.
+        ambiguity = clarify_mod.assess(resolution.query, retrieval)
+        if ambiguity.needed:
+            trace.total_ms = elapsed()
+            yield GroundedAnswer(
+                state=AnswerState.CLARIFICATION_NEEDED,
+                content=clarify_mod.message(ambiguity),
+                retrieval=retrieval,
+                evidence=assessment,
+                diagnostics={"topics": ambiguity.topics},
             )
             return
 

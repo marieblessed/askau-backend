@@ -49,7 +49,19 @@ def assess(
     question: str,
     result: RetrievalResult,
     *,
-    min_content_words: int = 2,
+    #: A question contributing *no* discriminating vocabulary at all.
+    #:
+    #: It was 2, and one too high. Measured against this module's own examples:
+    #: "tell me about procedures", "what are the rules", "tell me about
+    #: policies" all score **0**. "What is the disciplinary procedure for staff
+    #: members?" scores **1** — `procedure`, `staff` and `members` are generic
+    #: across an AU corpus, leaving `disciplinary` alone — and was refused as
+    #: too general, which it plainly is not.
+    #:
+    #: At 1, clarification fires only for questions that name nothing. That is
+    #: what the docstring above always described; the threshold simply did not
+    #: match it.
+    min_content_words: int = 1,
 ) -> ClarificationRequest:
     """Decide whether to ask rather than answer."""
     if result.is_empty:
@@ -59,10 +71,27 @@ def assess(
     if len(discriminating_words(question)) >= min_content_words:
         return ClarificationRequest.none()
 
+    # Nothing to choose between, nothing to ask.
+    #
+    # A clarifying question offers the reader a choice: *which* of these did you
+    # mean. When everything retrieved points at one document there is no choice
+    # to offer, and asking anyway is absurd — it tells somebody their question
+    # was too vague while holding the single answer to it.
+    #
+    # This is not hypothetical. "What is the disciplinary procedure for staff
+    # members?" scores one discriminating word, because `procedure`, `staff` and
+    # `members` are generic across this corpus. An HR officer asking about her
+    # own department's policy was told to "refine your question with more
+    # specific terms" — advice that could not have worked, since the question
+    # was already specific and the document was already first.
+    topics = _topics(result)
+    if len(topics) < 2:
+        return ClarificationRequest.none()
+
     return ClarificationRequest(
         needed=True,
         reason="This question is too general to identify which policy you mean.",
-        topics=_topics(result),
+        topics=topics,
     )
 
 

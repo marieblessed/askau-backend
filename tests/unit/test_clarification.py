@@ -92,3 +92,45 @@ class TestBoundaries:
     def test_organisational_filler_does_not_count_as_specificity(self) -> None:
         """ "AUC staff policy" is three words and zero discriminating terms."""
         assert assess("AUC staff policy", SCATTERED).needed
+
+
+class TestASpecificQuestionIsNotVague:
+    """The regression these tests did not have.
+
+    An HR officer asked "What is the disciplinary procedure for staff members?"
+    and was told to refine her question with more specific terms. It was already
+    specific; the matching document was already ranked first; she had every right
+    to read it.
+
+    `procedure`, `staff` and `members` are all generic across an AU corpus, so
+    the question reduced to one discriminating word against a threshold of two.
+    Every example above — "tell me about procedures", "What are the rules?" —
+    contributes **zero**. One is the boundary, and it was on the wrong side of it.
+    """
+
+    def test_one_discriminating_word_is_enough(self) -> None:
+        assert not assess("What is the disciplinary procedure for staff members?", SCATTERED).needed
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "What is the disciplinary procedure for staff members?",
+            "How do I claim reimbursement?",
+            "What are the thresholds for procurement?",
+        ],
+    )
+    def test_questions_that_name_something_are_answered(self, question: str) -> None:
+        """Each names exactly one thing, and each was refused before."""
+        assert not assess(question, SCATTERED).needed
+
+    def test_a_lone_candidate_is_no_choice_at_all(self) -> None:
+        """Clarification offers a choice. With one document there is none, and
+        asking withholds the single answer while implying the reader was
+        unclear."""
+        single = RetrievalResult(
+            chunks=(chunk(1, "Disciplinary Procedure"), chunk(2, "Disciplinary Procedure", 0.029)),
+            strategy=RetrievalStrategy.HYBRID,
+            candidates_considered=2,
+            took_ms=1,
+        )
+        assert not assess("policy", single).needed
