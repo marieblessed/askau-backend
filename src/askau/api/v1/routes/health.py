@@ -6,10 +6,17 @@ from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import text
 
-from askau.api.schemas.wire import HealthOut
+from askau.api.schemas.wire import HealthOut, HealthResponse
 from askau.core import cache
 
 router = APIRouter(tags=["health"])
+
+#: Served under `/api/v1/health` for the web client, separately from the probes
+#: above. Same subject, different audience: the probes tell an orchestrator
+#: whether to restart or route to this process, and their contract is a status
+#: code. This one tells a person's browser whether the service is usable, and
+#: its contract is a body shape the client already declares.
+api_router = APIRouter(prefix="/v1", tags=["health"])
 
 
 @router.get("/health/live", response_model=HealthOut)
@@ -130,3 +137,44 @@ async def prometheus(request: Request) -> str:
     from askau.observability.metrics import render
 
     return await render(request.app.state.engine)
+
+
+#: Bumped with the package. Reported so a support conversation can start with
+#: "which build were you on" rather than establishing it.
+_VERSION = "0.1.0"
+
+
+@api_router.get("/health", response_model=HealthResponse)
+async def api_health(request: Request) -> HealthResponse:
+    """Service health for the interface (`askau-frontend/types/api.ts`).
+
+    Unauthenticated, like the probes: it reports whether dependencies answer,
+    never anything about content. `down` is deliberately unreachable from here —
+    a request that reaches this handler proves the process is up, so the honest
+    values are `ok` and `degraded`. A client that cannot reach us at all sees a
+    network error, which is the accurate signal for `down`.
+    """
+    from datetime import UTC, datetime
+
+    settings = request.app.state.settings
+    services: dict[str, str] = {}
+
+    try:
+        async with request.app.state.engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        services["database"] = "ok"
+    except Exception:
+        # No exception type in the response: which driver failed and how is
+        # operational detail, and this endpoint is unauthenticated.
+        services["database"] = "down"
+
+    # Redis loss costs latency, not correctness — the principal resolver falls
+    # back to the database — so it degrades rather than downs the service.
+    services["redis"] = "ok" if await cache.ping(settings) else "degraded"
+
+    return HealthResponse(
+        status="degraded" if any(v != "ok" for v in services.values()) else "ok",
+        version=_VERSION,
+        timestamp=datetime.now(UTC).isoformat(),
+        services=services,
+    )

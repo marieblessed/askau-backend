@@ -30,21 +30,21 @@ class TestHealth:
 
 class TestAuthentication:
     async def test_no_token_is_401(self, client: httpx.AsyncClient) -> None:
-        resp = await client.get("/auth/me")
+        resp = await client.get("/api/v1/auth/me")
         assert resp.status_code == 401
         assert resp.headers["content-type"].startswith("application/problem+json")
 
     async def test_garbage_token_is_401(self, client: httpx.AsyncClient) -> None:
-        assert (await client.get("/auth/me", headers=auth("not-a-token"))).status_code == 401
+        assert (await client.get("/api/v1/auth/me", headers=auth("not-a-token"))).status_code == 401
 
     async def test_me_never_exposes_the_principal_set(
         self, client: httpx.AsyncClient, token
     ) -> None:
         """The client has no use for it, and shipping it would put the
         access-control model on the wire."""
-        body = (await client.get("/auth/me", headers=auth(token("staff.finance")))).json()
+        body = (await client.get("/api/v1/auth/me", headers=auth(token("staff.finance")))).json()
         assert "principals" not in body
-        assert isinstance(body["principal_count"], int)
+        assert isinstance(body["principalCount"], int)
 
     async def test_correlation_id_is_echoed(self, client: httpx.AsyncClient) -> None:
         resp = await client.get("/health/live")
@@ -57,13 +57,13 @@ class TestAuthorizationThroughTheApi:
     ) -> None:
         body = (
             await client.post(
-                "/v1/ask",
+                "/api/v1/ask",
                 headers=auth(token("staff.finance")),
                 json={"content": "What are the budget reallocation thresholds?"},
             )
         ).json()
-        assert body["answer_state"] == "grounded"
-        titles = {c["document_title"] for c in body["citations"]}
+        assert body["answerState"] == "grounded"
+        titles = {c["documentTitle"] for c in body["citations"]}
         assert "Budget Reallocation Procedure" in titles
 
     async def test_other_department_is_refused_not_leaked(
@@ -71,12 +71,12 @@ class TestAuthorizationThroughTheApi:
     ) -> None:
         body = (
             await client.post(
-                "/v1/ask",
+                "/api/v1/ask",
                 headers=auth(token("staff.misd")),
                 json={"content": "What are the budget reallocation thresholds?"},
             )
         ).json()
-        assert body["answer_state"] == "insufficient_evidence"
+        assert body["answerState"] == "insufficient_evidence"
         assert "Budget Reallocation" not in body["content"]
 
     async def test_a_refusal_carries_no_citations(self, client: httpx.AsyncClient, token) -> None:
@@ -84,12 +84,12 @@ class TestAuthorizationThroughTheApi:
         and invite the reader to believe it found something after all."""
         body = (
             await client.post(
-                "/v1/ask",
+                "/api/v1/ask",
                 headers=auth(token("staff.misd")),
                 json={"content": "What is the capital of Brazil?"},
             )
         ).json()
-        assert body["answer_state"] == "insufficient_evidence"
+        assert body["answerState"] == "insufficient_evidence"
         assert body["citations"] == []
 
 
@@ -98,7 +98,7 @@ class TestRoleGuards:
         self, client: httpx.AsyncClient, token
     ) -> None:
         resp = await client.get(
-            "/v1/debug/retrieve",
+            "/api/v1/debug/retrieve",
             params={"q": "travel"},
             headers=auth(token("staff.misd")),
         )
@@ -106,7 +106,7 @@ class TestRoleGuards:
 
     async def test_system_admin_can(self, client: httpx.AsyncClient, token) -> None:
         resp = await client.get(
-            "/v1/debug/retrieve",
+            "/api/v1/debug/retrieve",
             params={"q": "travel"},
             headers=auth(token("admin.system")),
         )
@@ -118,7 +118,7 @@ class TestStreamingProtocol:
     async def _events(self, client: httpx.AsyncClient, tok: str, question: str):
         events: list[tuple[str, dict]] = []
         async with client.stream(
-            "POST", "/v1/ask/stream", headers=auth(tok), json={"content": question}
+            "POST", "/api/v1/ask/stream", headers=auth(tok), json={"content": question}
         ) as resp:
             assert resp.status_code == 200
             name = ""
@@ -146,7 +146,7 @@ class TestStreamingProtocol:
             client, token("staff.misd"), "What is the annual leave entitlement?"
         )
         done = next(d for n, d in events if n == "done")
-        assert done["answer_state"] in {"grounded", "partially_grounded", "conflict"}
+        assert done["answerState"] in {"grounded", "partially_grounded", "conflict"}
         assert done["groundedness"] is not None
 
     async def test_done_carries_the_refusal_text(self, client: httpx.AsyncClient, token) -> None:
@@ -156,7 +156,7 @@ class TestStreamingProtocol:
         events = await self._events(client, token("staff.misd"), "What is the capital of Brazil?")
         assert not any(n == "token" for n, _ in events)
         done = next(d for n, d in events if n == "done")
-        assert done["answer_state"] == "insufficient_evidence"
+        assert done["answerState"] == "insufficient_evidence"
         assert len(done["content"]) > 50
         assert done["citations"] == []
 
@@ -184,9 +184,11 @@ class TestDocumentAccess:
         assert 404 against a document everyone may open — and fail for a reason
         that has nothing to do with authorization.
         """
-        body = (await client.post("/v1/ask", headers=auth(tok), json={"content": question})).json()
-        match = next(c for c in body["citations"] if c["document_title"] == title)
-        return str(match["document_id"])
+        body = (
+            await client.post("/api/v1/ask", headers=auth(tok), json={"content": question})
+        ).json()
+        match = next(c for c in body["citations"] if c["documentTitle"] == title)
+        return str(match["documentId"])
 
     async def test_open_redirects_to_the_authoritative_source(
         self, client: httpx.AsyncClient, token
@@ -197,7 +199,7 @@ class TestDocumentAccess:
         doc = await self._document_titled(
             client, tok, "What is the annual leave entitlement?", "Annual Leave Policy"
         )
-        resp = await client.get(f"/v1/documents/{doc}/open", headers=auth(tok))
+        resp = await client.get(f"/api/v1/documents/{doc}/open", headers=auth(tok))
         assert resp.status_code == 302
         assert resp.headers["location"].startswith("https://")
 
@@ -211,7 +213,7 @@ class TestDocumentAccess:
             "What are the budget reallocation thresholds?",
             "Budget Reallocation Procedure",
         )
-        resp = await client.get(f"/v1/documents/{doc}/open", headers=auth(token("staff.misd")))
+        resp = await client.get(f"/api/v1/documents/{doc}/open", headers=auth(token("staff.misd")))
         assert resp.status_code == 404
 
     async def test_metadata_is_also_permission_checked(
@@ -224,14 +226,16 @@ class TestDocumentAccess:
             "What are the budget reallocation thresholds?",
             "Budget Reallocation Procedure",
         )
-        assert (await client.get(f"/v1/documents/{doc}", headers=auth(finance))).status_code == 200
         assert (
-            await client.get(f"/v1/documents/{doc}", headers=auth(token("staff.hr")))
+            await client.get(f"/api/v1/documents/{doc}", headers=auth(finance))
+        ).status_code == 200
+        assert (
+            await client.get(f"/api/v1/documents/{doc}", headers=auth(token("staff.hr")))
         ).status_code == 404
 
     async def test_unknown_document_is_404(self, client: httpx.AsyncClient, token) -> None:
         resp = await client.get(
-            "/v1/documents/00000000-0000-0000-0000-000000000000/open",
+            "/api/v1/documents/00000000-0000-0000-0000-000000000000/open",
             headers=auth(token("staff.misd")),
         )
         assert resp.status_code == 404
@@ -244,7 +248,7 @@ class TestInjectionResistance:
         """The vendor checklist contains an instruction-override attempt."""
         body = (
             await client.post(
-                "/v1/ask",
+                "/api/v1/ask",
                 headers=auth(token("staff.misd")),
                 json={"content": "What documents are required for vendor onboarding?"},
             )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 
 from askau.domain.enums import (
     AnswerState,
@@ -37,6 +37,14 @@ class Citation:
     page_from: int | None = None
     page_to: int | None = None
     version_label: str | None = None
+    #: Document governance, for the source card: who owns it, what kind of
+    #: document it is, whether it is still current, and from when. A reader
+    #: deciding whether to act on a quotation needs these more than they need
+    #: the passage's rank.
+    department: str | None = None
+    doc_type: str | None = None
+    lifecycle: str | None = None
+    effective_from: date | None = None
     #: The sensitivity of the document this citation came from. Carried to the
     #: reader because an answer assembled from restricted material looks exactly
     #: like any other answer on screen — and the reader is the one deciding

@@ -15,14 +15,14 @@ def auth(tok: str) -> dict[str, str]:
 
 
 async def _new(client: httpx.AsyncClient, tok: str) -> str:
-    resp = await client.post("/v1/conversations", headers=auth(tok), json={})
+    resp = await client.post("/api/v1/conversations", headers=auth(tok), json={})
     assert resp.status_code == 201
     return str(resp.json()["id"])
 
 
 async def _ask(client: httpx.AsyncClient, tok: str, cid: str, q: str) -> dict:
     resp = await client.post(
-        f"/v1/conversations/{cid}/messages", headers=auth(tok), json={"content": q}
+        f"/api/v1/conversations/{cid}/messages", headers=auth(tok), json={"content": q}
     )
     assert resp.status_code == 200, resp.text
     return dict(resp.json())
@@ -34,12 +34,16 @@ class TestPersistence:
         cid = await _new(client, tok)
         await _ask(client, tok, cid, "What is the annual leave entitlement?")
 
-        messages = (await client.get(f"/v1/conversations/{cid}", headers=auth(tok))).json()[
+        messages = (await client.get(f"/api/v1/conversations/{cid}", headers=auth(tok))).json()[
             "messages"
         ]
         assert [m["role"] for m in messages] == ["user", "assistant"]
-        assert messages[1]["answer_state"] == "grounded"
-        assert messages[1]["citations"]
+        assert messages[1]["state"] == "grounded"
+        # `sources`, not `citations`: a stored turn is returned in the shape the
+        # interface renders, and its richer per-source metadata is what makes a
+        # reopened answer checkable rather than just readable.
+        assert messages[1]["sources"]
+        assert messages[1]["groundingCount"] == len(messages[1]["sources"])
 
     async def test_the_first_question_titles_the_conversation(
         self, client: httpx.AsyncClient, token
@@ -47,8 +51,8 @@ class TestPersistence:
         tok = token("staff.misd")
         cid = await _new(client, tok)
         await _ask(client, tok, cid, "What is the annual leave entitlement?")
-        listed = (await client.get("/v1/conversations", headers=auth(tok))).json()
-        mine = next(c for c in listed["conversations"] if c["id"] == cid)
+        listed = (await client.get("/api/v1/conversations", headers=auth(tok))).json()
+        mine = next(c for c in listed["items"] if c["id"] == cid)
         assert mine["title"].startswith("What is the annual leave")
 
     async def test_citations_resolve_to_real_documents(
@@ -60,7 +64,7 @@ class TestPersistence:
         cid = await _new(client, tok)
         body = await _ask(client, tok, cid, "What is the annual leave entitlement?")
         for c in body["citations"]:
-            resp = await client.get(f"/v1/documents/{c['document_id']}", headers=auth(tok))
+            resp = await client.get(f"/api/v1/documents/{c['documentId']}", headers=auth(tok))
             assert resp.status_code == 200
 
 
@@ -72,8 +76,8 @@ class TestFollowUps:
         await _ask(client, tok, cid, "What is the annual leave entitlement?")
         follow = await _ask(client, tok, cid, "Does this apply to staff on probation?")
 
-        assert follow["answer_state"] == "grounded"
-        titles = {c["document_title"] for c in follow["citations"]}
+        assert follow["answerState"] == "grounded"
+        titles = {c["documentTitle"] for c in follow["citations"]}
         assert "Annual Leave Policy" in titles
 
     async def test_the_same_follow_up_alone_cannot_be_answered(
@@ -84,7 +88,7 @@ class TestFollowUps:
         tok = token("staff.misd")
         cid = await _new(client, tok)
         alone = await _ask(client, tok, cid, "Does this apply to staff on probation?")
-        assert alone["answer_state"] != "grounded"
+        assert alone["answerState"] != "grounded"
 
 
 class TestOwnershipIsolation:
@@ -96,13 +100,15 @@ class TestOwnershipIsolation:
         cid = await _new(client, owner)
         await _ask(client, owner, cid, "What is the annual leave entitlement?")
 
-        resp = await client.get(f"/v1/conversations/{cid}", headers=auth(token("staff.finance")))
+        resp = await client.get(
+            f"/api/v1/conversations/{cid}", headers=auth(token("staff.finance"))
+        )
         assert resp.status_code == 404
 
     async def test_another_user_cannot_post_into_it(self, client: httpx.AsyncClient, token) -> None:
         cid = await _new(client, token("staff.misd"))
         resp = await client.post(
-            f"/v1/conversations/{cid}/messages",
+            f"/api/v1/conversations/{cid}/messages",
             headers=auth(token("staff.finance")),
             json={"content": "What is the annual leave entitlement?"},
         )
@@ -110,15 +116,17 @@ class TestOwnershipIsolation:
 
     async def test_another_user_cannot_delete_it(self, client: httpx.AsyncClient, token) -> None:
         cid = await _new(client, token("staff.misd"))
-        resp = await client.delete(f"/v1/conversations/{cid}", headers=auth(token("staff.finance")))
+        resp = await client.delete(
+            f"/api/v1/conversations/{cid}", headers=auth(token("staff.finance"))
+        )
         assert resp.status_code == 404
 
     async def test_listing_shows_only_your_own(self, client: httpx.AsyncClient, token) -> None:
         mine = await _new(client, token("staff.misd"))
         listed = (
-            await client.get("/v1/conversations", headers=auth(token("staff.finance")))
+            await client.get("/api/v1/conversations", headers=auth(token("staff.finance")))
         ).json()
-        assert mine not in {c["id"] for c in listed["conversations"]}
+        assert mine not in {c["id"] for c in listed["items"]}
 
 
 class TestFeedback:
@@ -127,7 +135,7 @@ class TestFeedback:
         cid = await _new(client, tok)
         body = await _ask(client, tok, cid, "What is the annual leave entitlement?")
         resp = await client.post(
-            f"/v1/messages/{body['message_id']}/feedback",
+            f"/api/v1/messages/{body['messageId']}/feedback",
             headers=auth(tok),
             json={"rating": "helpful"},
         )
@@ -140,11 +148,14 @@ class TestFeedback:
         cid = await _new(client, tok)
         body = await _ask(client, tok, cid, "What is the annual leave entitlement?")
         resp = await client.post(
-            f"/v1/messages/{body['message_id']}/feedback",
+            f"/api/v1/messages/{body['messageId']}/feedback",
             headers=auth(tok),
             json={"rating": "not_helpful"},
         )
-        assert resp.status_code == 400
+        # 422, not 400: their client only reads `message` and `fieldErrors` off a
+        # 422, and turns every other 4xx into an opaque "unexpected error" in
+        # production — so a 400 would hide the very explanation we wrote.
+        assert resp.status_code == 422
 
     async def test_feedback_reads_back_on_the_message(
         self, client: httpx.AsyncClient, token
@@ -153,11 +164,11 @@ class TestFeedback:
         cid = await _new(client, tok)
         body = await _ask(client, tok, cid, "What is the annual leave entitlement?")
         await client.post(
-            f"/v1/messages/{body['message_id']}/feedback",
+            f"/api/v1/messages/{body['messageId']}/feedback",
             headers=auth(tok),
             json={"rating": "not_helpful", "reason": "outdated_information"},
         )
-        messages = (await client.get(f"/v1/conversations/{cid}", headers=auth(tok))).json()[
+        messages = (await client.get(f"/api/v1/conversations/{cid}", headers=auth(tok))).json()[
             "messages"
         ]
         assert messages[1]["feedback"] == "not_helpful"
@@ -167,8 +178,53 @@ class TestFeedback:
         cid = await _new(client, tok)
         body = await _ask(client, tok, cid, "What is the annual leave entitlement?")
         resp = await client.post(
-            f"/v1/messages/{body['message_id']}/feedback",
+            f"/api/v1/messages/{body['messageId']}/feedback",
             headers=auth(token("staff.finance")),
             json={"rating": "helpful"},
         )
         assert resp.status_code == 404
+
+
+class TestConversationTitle:
+    """The detail response names itself (FR-006).
+
+    Added so a permalink can render a heading and a document title without
+    fetching the whole conversation list. The scoping is the part worth testing:
+    a title is a summary of what someone asked, and §6.5 treats that as their
+    business alone — so the title query carries the same `user_id` predicate as
+    every other read, and this proves it rather than assuming it.
+    """
+
+    async def test_detail_carries_the_title(self, client, token) -> None:
+        headers = {"Authorization": f"Bearer {token('staff.finance')}"}
+        created = await client.post("/api/v1/conversations", json={}, headers=headers)
+        conversation_id = created.json()["id"]
+        await client.post(
+            f"/api/v1/conversations/{conversation_id}/messages",
+            json={"content": "What is the annual leave entitlement?"},
+            headers=headers,
+        )
+
+        body = (
+            await client.get(f"/api/v1/conversations/{conversation_id}", headers=headers)
+        ).json()
+        assert body["title"], "the detail response cannot name itself"
+        assert "annual leave" in body["title"].lower()
+
+    async def test_another_users_title_is_not_disclosed(self, client, token) -> None:
+        owner = {"Authorization": f"Bearer {token('staff.finance')}"}
+        other = {"Authorization": f"Bearer {token('staff.misd')}"}
+
+        created = await client.post("/api/v1/conversations", json={}, headers=owner)
+        conversation_id = created.json()["id"]
+        await client.post(
+            f"/api/v1/conversations/{conversation_id}/messages",
+            json={"content": "What is the annual leave entitlement?"},
+            headers=owner,
+        )
+
+        response = await client.get(f"/api/v1/conversations/{conversation_id}", headers=other)
+        # 404, not 403: confirming that an id exists but belongs to someone else
+        # discloses that they asked something.
+        assert response.status_code == 404, response.status_code
+        assert "annual leave" not in response.text.lower()

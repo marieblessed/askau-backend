@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -29,14 +30,16 @@ from askau.api.v1.routes import (
     security,
     session,
 )
+from askau.api.v1.routes import knowledge_bases as knowledge_bases_routes
 from askau.audit.writer import AuditWriter
 from askau.core import cache
 from askau.core.authz import AuthorizationResolver
 from askau.core.correlation import HEADER, get_correlation_id, set_correlation_id
-from askau.core.errors import AskAUError
+from askau.core.errors import AskAUError, InvalidRequestError
 from askau.core.identity import build_verifier
 from askau.db.conversations import ConversationRepository
 from askau.db.engine import assert_database_ready, dispose_engines, get_engine
+from askau.db.eval_sampling import EvalSampler
 from askau.llm.registry import build_embedder, build_llm
 from askau.llm.usage import UsageLedger
 from askau.rag.orchestrator import RagOrchestrator
@@ -78,6 +81,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.usage = usage
     app.state.conversations = ConversationRepository(engine)
+    app.state.eval_sampler = EvalSampler(engine)
 
     _log.info(
         "AskAU ready — env=%s auth=%s llm=%s embed=%s",
@@ -125,11 +129,52 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(AskAUError)
     async def askau_error_handler(request: Request, exc: AskAUError) -> JSONResponse:
+        headers: dict[str, str] = {}
+        # `Retry-After` as a header, not only in the body. Their
+        # `RateLimitedError` carries a `retryAfter` field and the header is the
+        # standard place to read it from — a client that backs off correctly is
+        # worth more to us than one that has to parse a body to find out how long.
+        retry_after = getattr(exc, "retry_after", None)
+        if retry_after is not None:
+            headers["Retry-After"] = str(int(retry_after))
+
         return JSONResponse(
             status_code=exc.status,
             content=exc.to_problem(get_correlation_id(), str(request.url.path)),
             media_type="application/problem+json",
+            headers=headers or None,
         )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """Field validation, in our error contract rather than FastAPI's.
+
+        Without this, FastAPI answers its own validation failures with
+        `{"detail": [{...}]}` — a shape their `lib/api/errors.ts` cannot read.
+        It looks for `message` and `fieldErrors`; finding neither, it produces
+        `UnknownApiError`, and their production build suppresses the message. So
+        the single most common error a client hits — a field that is empty, too
+        long, or missing — reached the user as "An unexpected error occurred",
+        with the explanation we had already written discarded on the way.
+
+        `InvalidRequestError` was moved to 422 for exactly this reason, which is
+        what made the omission easy to miss: errors we *raise* were already
+        right, and errors FastAPI raises for us were never converted.
+        """
+        field_errors: dict[str, list[str]] = {}
+        for err in exc.errors():
+            # Drop the leading "body" / "query" segment: their form binds by
+            # field name, and `body.content` matches no input on their side.
+            location = [str(p) for p in err["loc"][1:]] or [str(p) for p in err["loc"]]
+            field_errors.setdefault(".".join(location), []).append(err["msg"])
+
+        problem = InvalidRequestError(
+            "The request could not be processed. Check the highlighted fields."
+        ).to_problem(get_correlation_id(), str(request.url.path))
+        # `fieldErrors` last: it is the member their form rendering depends on,
+        # and `to_problem` has no business knowing about it.
+        problem["fieldErrors"] = field_errors
+        return JSONResponse(status_code=422, content=problem, media_type="application/problem+json")
 
     @app.exception_handler(Exception)
     async def unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -144,26 +189,50 @@ def create_app() -> FastAPI:
                 "title": "Internal error",
                 "status": 500,
                 "detail": "An unexpected error occurred.",
-                "correlation_id": correlation,
+                # Same extension members as every other error, so a client never
+                # has to special-case the one response it is most likely to hit
+                # when something is badly wrong.
+                "code": "SERVER_ERROR",
+                "message": "An unexpected error occurred.",
+                "correlationId": correlation,
             },
             media_type="application/problem+json",
         )
 
+    # Probes and metrics stay at the root, unprefixed. They are scraped by the
+    # kubelet and by Prometheus, neither of which knows or should know about an
+    # API version — and `/api/*` is the path the web client's proxy forwards, so
+    # putting a liveness probe behind it would route infrastructure traffic
+    # through an application concern.
+    app.include_router(health.router)
+
+    # Everything else is the published API surface, under `/api`.
+    #
+    # `/api` and not bare `/v1`, because the client sends every request to
+    # `NEXT_PUBLIC_API_BASE_URL` and expects to reach us at `/api/v1`. The
+    # version stays in each router's own prefix so a future `/api/v2` is an
+    # addition rather than a rename.
+    #
+    # Note our auth routes live at `/api/v1/auth/*`, deliberately *not*
+    # `/api/auth/*`: NextAuth owns that path on the client and its middleware
+    # short-circuits it, so anything of ours there would be unreachable.
     for router in (
-        health.router,
+        health.api_router,
         auth.router,
+        auth.users_router,
         session.router,
         ask.router,
         documents.router,
         conversations.router,
         conversations.feedback_router,
         knowledge.router,
+        knowledge_bases_routes.router,
         admin.router,
         security.router,
         evaluation.router,
         debug.router,
     ):
-        app.include_router(router)
+        app.include_router(router, prefix="/api")
     return app
 
 
