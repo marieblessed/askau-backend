@@ -1,6 +1,6 @@
 """Closed vocabularies shared across the platform.
 
-These mirror the PostgreSQL enums in docs/architecture/03-database-schema.md §0.
+These mirror the PostgreSQL enums defined by the migrations under `alembic/`.
 Keeping them as ``str`` enums means they serialize to the wire and bind to the
 database without translation layers.
 """

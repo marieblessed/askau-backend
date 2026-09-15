@@ -23,10 +23,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-#: Repository root, then the shared component. Resolved by walking up from this
-#: file rather than from the working directory, so `make contract` behaves the
-#: same whether it is run from the component or the repository root.
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+#: Repository root, resolved by walking up from this file rather than from the
+#: working directory, so `make contract` behaves the same wherever it is run.
+#:
+#: `parents[3]`, not `[4]`: the contract used to live one level above the `api`
+#: component, because a sibling `web/` component consumed it. The client now has
+#: its own repository and this one is the backend, so `[4]` resolved *outside*
+#: the repository — `make contract-check`, and therefore `make check`, would
+#: have failed on a fresh clone.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTRACT_PATH = _REPO_ROOT / "contracts" / "openapi.json"
 
 

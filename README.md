@@ -5,7 +5,9 @@ assistant for the African Union Commission. A FastAPI service providing
 authenticated, permission-aware retrieval and grounded, cited answers over
 approved AUC knowledge sources.
 
-Design: [`../docs/architecture/`](../docs/architecture/README.md).
+Design documentation — architecture, decision records, the requirements trace — is
+maintained by the programme separately from this repository. Ask the AskAU team for it;
+nothing in the build needs it.
 
 ## The one thing to understand
 

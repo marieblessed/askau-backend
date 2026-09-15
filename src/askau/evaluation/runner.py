@@ -13,7 +13,7 @@ by the pipeline itself and read back from the message; what this harness adds is
 the deterministic half — did retrieval find the right family, did the answer land
 in the expected state, did anything unauthorized appear. Those are the checks
 that gate a build. Semantic judging needs a second model and a human calibration
-set (see `docs/architecture/08-evaluation-harness.md` §4) and is Phase 2 work.
+set (see the evaluation-harness note in the architecture documentation) and is Phase 2 work.
 """
 
 from __future__ import annotations

@@ -304,8 +304,8 @@ ORDER BY count(*) DESC
 _REMEDIES: dict[str, str] = {
     "no_text_layer": (
         "Scanned documents with no extractable text. Ask the source owner for the "
-        "original, or enable OCR (needs Tesseract on the worker — see "
-        "docs/architecture/16-host-dependencies.md)."
+        "original, or configure OCR — it runs as a Tika container, never as a host "
+        "install. Set ASKAU_OCR_PROVIDER and ASKAU_OCR_URL."
     ),
     "insufficient_text": (
         "Extracted almost nothing. Usually a cover sheet, a placeholder, or a "
@@ -355,8 +355,7 @@ _REMEDIES: dict[str, str] = {
     ),
     "ocr_unavailable": (
         "The document needs OCR and no OCR service is configured. Set "
-        "ASKAU_OCR_PROVIDER and ASKAU_OCR_URL to a Tika container "
-        "(docs/architecture/16-host-dependencies.md), then reprocess."
+        "ASKAU_OCR_PROVIDER and ASKAU_OCR_URL to a Tika container, then reprocess."
     ),
 }
 
