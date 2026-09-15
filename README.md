@@ -47,6 +47,21 @@ Defaults run credential-free: `ASKAU_LLM_PROVIDER=echo` and
 evidence gate, citation validation — with no model endpoint and no cost. Both are
 refused in production by configuration validation.
 
+They cost you answer *quality*, not correctness: an ACL bug is as visible under
+`hash` embeddings as under real ones. For real embeddings, install the optional
+extra and **re-seed** — `make setup` deliberately leaves it out, because it pulls
+torch:
+
+```bash
+.venv/bin/pip install -e ".[embeddings]"
+# then set ASKAU_EMBEDDING_PROVIDER=sentence_transformers, ASKAU_EMBEDDING_MODEL=BAAI/bge-m3
+make seed
+```
+
+Re-seeding is not optional. A query embedded by one model cannot be compared
+against vectors written by another — they are points in unrelated spaces — and
+the failure is silent: retrieval returns noise that looks like results.
+
 ## Seeing the design work
 
 The seeded identities have deliberately overlapping group membership, so
