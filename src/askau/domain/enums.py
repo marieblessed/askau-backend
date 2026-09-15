@@ -65,11 +65,19 @@ class PrincipalKind(StrEnum):
 
 
 class SourceType(StrEnum):
-    SHAREPOINT = "sharepoint"
-    DMS = "dms"
+    """Where documents come from.
+
+    Narrowed to what the AUC actually deploys (ADR-0029): Azure Blob Storage,
+    plus the two local kinds. `sharepoint`, `dms`, `s3` and `http` were removed.
+
+    Their values remain in the PostgreSQL `source_type` enum — the type cannot
+    have values removed without recreating it and rewriting every column that
+    uses it, which is a large amount of risk to retire four strings nothing can
+    write any more. They are unreachable from here, which is what matters.
+    """
+
+    AZURE_BLOB = "azure_blob"
     FILESYSTEM = "filesystem"
-    S3 = "s3"
-    HTTP = "http"
     MANUAL = "manual"
 
 

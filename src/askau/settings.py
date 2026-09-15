@@ -50,6 +50,21 @@ class Settings(BaseSettings):
     entra_tenant_id: str = ""
     entra_client_id: str = ""
     entra_audience: str = ""
+    #: App-only credential for ingestion (client-credentials flow). Separate
+    #: from the API's own Entra registration on purpose: the ingestion identity
+    #: reads document containers and the API identity validates user tokens, and
+    #: one compromised secret should not be both.
+    #:
+    #: Empty means the Azure Blob connector is unconfigured, which `probe`
+    #: reports as such rather than failing with an authentication error that
+    #: reads like a tenant problem.
+    azure_storage_client_id: str = ""
+    azure_storage_client_secret: str = ""
+    #: An alternative to the service principal, for the emulator and for
+    #: time-boxed testing against a real account. There is deliberately no
+    #: account-key setting: an account key grants everything the storage account
+    #: can do, to anyone holding it, with no expiry and no audit trail.
+    azure_storage_sas_token: str = ""
 
     # ── embeddings ──────────────────────────────────────────────────────────
     embedding_provider: EmbeddingProvider = "hash"
@@ -200,6 +215,14 @@ class Settings(BaseSettings):
     @property
     def ocr_enabled(self) -> bool:
         return self.ocr_provider != "none"
+
+    @property
+    def azure_storage_configured(self) -> bool:
+        """Either credential is enough; neither means the connector is absent."""
+        return bool(
+            (self.azure_storage_client_id and self.azure_storage_client_secret)
+            or self.azure_storage_sas_token
+        )
 
     @property
     def is_dev_auth(self) -> bool:

@@ -14,10 +14,11 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import Field
 from sqlalchemy import text
 
 from askau.api.deps import AuthzDep
+from askau.api.schemas.wire import WireModel
 from askau.audit.events import EventType
 from askau.audit.writer import AuditEvent
 from askau.core.errors import ConflictError, InvalidRequestError, NotFoundError
@@ -27,12 +28,12 @@ from askau.domain.enums import AuditOutcome
 router = APIRouter(prefix="/v1/knowledge", tags=["knowledge"])
 
 
-class SourceIn(BaseModel):
+class SourceIn(WireModel):
     """FR-011. Governance metadata is required, not optional — an unowned source
     has nobody accountable for its content (BR-002)."""
 
     name: str = Field(min_length=3, max_length=200)
-    source_type: Literal["sharepoint", "dms", "filesystem", "s3", "http", "manual"]
+    source_type: Literal["azure_blob", "filesystem", "manual"]
     department: str = Field(min_length=2, max_length=120)
     business_owner_email: str
     default_classification: Literal["public", "internal", "confidential", "highly_restricted"]
@@ -41,7 +42,7 @@ class SourceIn(BaseModel):
     sync_cron: str | None = None
 
 
-class SourcePatch(BaseModel):
+class SourcePatch(WireModel):
     description: str | None = Field(default=None, max_length=2000)
     sync_cron: str | None = None
     status: Literal["draft", "active", "paused", "archived"] | None = None
@@ -50,7 +51,7 @@ class SourcePatch(BaseModel):
     ) = None
 
 
-class DocumentPatch(BaseModel):
+class DocumentPatch(WireModel):
     """FR-013 correction path: metadata fixed by an administrator after ingest."""
 
     classification: Literal["public", "internal", "confidential", "highly_restricted"] | None = None
@@ -336,7 +337,11 @@ async def sync_source(source_id: str, authz: AuthzDep, request: Request) -> dict
         run_id=run_id,
         mode="sync",
     )
-    return {"run_id": run_id, "status": "running", "location": f"/v1/admin/ingestion/runs/{run_id}"}
+    return {
+        "run_id": run_id,
+        "status": "running",
+        "location": f"/api/v1/admin/ingestion/runs/{run_id}",
+    }
 
 
 @router.post("/sources/{source_id}/reindex", status_code=202)
@@ -353,7 +358,11 @@ async def reindex_source(source_id: str, authz: AuthzDep, request: Request) -> d
         run_id=run_id,
         mode="reindex",
     )
-    return {"run_id": run_id, "status": "running", "location": f"/v1/admin/ingestion/runs/{run_id}"}
+    return {
+        "run_id": run_id,
+        "status": "running",
+        "location": f"/api/v1/admin/ingestion/runs/{run_id}",
+    }
 
 
 @router.post("/sources/{source_id}/test-connection")
@@ -380,7 +389,9 @@ async def test_connection(source_id: str, authz: AuthzDep, request: Request) -> 
 
     from askau.ingestion.connectors import probe
 
-    result = await probe(row["source_type"], dict(row["location"] or {}))
+    result = await probe(
+        row["source_type"], dict(row["location"] or {}), request.app.state.settings
+    )
     return {"source_id": source_id, **result}
 
 
